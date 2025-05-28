@@ -1,0 +1,92 @@
+<html>
+    <head>
+        <style>
+            body {
+                font-family: 'Arial', sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+            .header {
+                background-color: #28a745;
+                color: white;
+                padding: 20px;
+                text-align: center;
+                border-radius: 8px 8px 0 0;
+            }
+            .content {
+                background-color: #ffffff;
+                padding: 30px;
+                border: 1px solid #e0e0e0;
+                border-radius: 0 0 8px 8px;
+            }
+            .success-badge {
+                background-color: #28a745;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 20px;
+                display: inline-block;
+                margin: 20px 0;
+            }
+            .next-steps {
+                background-color: #f8f9fa;
+                padding: 20px;
+                border-radius: 4px;
+                margin: 20px 0;
+            }
+            .button {
+                display: inline-block;
+                padding: 12px 24px;
+                background-color: #28a745;
+                color: white;
+                text-decoration: none;
+                border-radius: 4px;
+                margin: 20px 0;
+            }
+            .footer {
+                text-align: center;
+                margin-top: 20px;
+                color: #666;
+                font-size: 0.9em;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Congratulations!</h1>
+        </div>
+        <div class="content">
+            <p>Dear 'Applicant',</p>
+            
+            <p>We are pleased to inform you that your admission application has been <span class="success-badge">APPROVED</span></p>
+            
+            <div class="next-steps">
+                <h2>Next Steps:</h2>
+                <ol>
+                    <li>Accept your admission offer</li>
+                    <li>Complete the enrollment process</li>
+                    <li>Pay any required fees</li>
+                    <li>Attend the orientation program</li>
+                </ol>
+            </div>
+            
+            <p>Your admission details:</p>
+            <ul>
+                <li><strong>Admission Number:</strong> {{ admission_number }}</li>
+                
+            </ul>
+            
+            <a href="https://plvcmonline.uk/dashboard" class="button">Track Your Application</a>
+            
+            <p>Please complete your enrollment process within the next 14 days to secure your place.</p>
+            
+            <p>Welcome to!</p>
+        </div>
+        <div class="footer">
+            <p>This is an automated message, please do not reply to this email.</p>
+            <p>&copy; Admissions Office</p>
+        </div>
+    </body>
+</html>

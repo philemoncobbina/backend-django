@@ -1,0 +1,28 @@
+# Environment files
+.env
+
+# Ignore database file
+db.sqlite3
+*.sqlite3
+
+# Ignore migration files that shouldn't be versioned
+*.log
+*.pot
+*.pyc
+*.pyo
+__pycache__/
+
+# Ignore virtual environment directories
+venv/
+env/
+
+# Ignore other potentially sensitive or machine-specific files
+*.pem
+*.key
+*.bak
+*.swp
+
+# Ignore specific images in media/screenshots
+media/screenshots/pexels-tima-miroshnichenko-5453808_VSs1JsR.jpg
+media/screenshots/pexels-tima-miroshnichenko-5453808_usfO4cl.jpg
+media/screenshots/*.jpg

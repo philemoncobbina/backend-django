@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Login Alert</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 600px;
+            margin: auto;
+            background: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        p {
+            color: #555;
+            line-height: 1.6;
+        }
+        .footer {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>New Login Alert</h1>
+        <p>Dear {{ first_name }},</p>
+        <p>Your account was accessed from a new location with the following details:</p>
+        <p>
+            <strong>Location:</strong> {{ city }}, {{ country_name }}<br>
+            <strong>IP Address:</strong> {{ ip_address }}<br>
+            <strong>Device OS:</strong> {{ device_os }}<br>
+            <strong>Device Name:</strong> {{ device_name }}
+        </p>
+        <p>If this was you, you can safely disregard this email. If not, please secure your account immediately.</p>
+        <p>For added security, you may want to change your password.</p>
+        <p>Best regards,<br>Your Support Team</p>
+    </div>
+    <div class="footer">
+        <p>This is an automated message. Please do not reply.</p>
+    </div>
+</body>
+</html>
