@@ -15,11 +15,28 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file in project root
+# Load environment variables with error handling
 env_path = Path(__file__).resolve().parent.parent / '.env'
-load_dotenv(env_path, encoding='utf-16') # Explicitly specify encoding
 
+def load_env_with_fallback(env_path):
+    """Load .env file with encoding fallback"""
+    encodings = ['utf-8', 'utf-16', 'utf-16le', 'utf-16be', 'latin1']
+    
+    for encoding in encodings:
+        try:
+            load_dotenv(env_path, encoding=encoding)
+            print(f"Successfully loaded .env with {encoding} encoding")
+            return
+        except UnicodeDecodeError:
+            continue
+    
+    raise ValueError("Could not load .env file with any supported encoding")
 
+# Try to load the environment file
+if env_path.exists():
+    load_env_with_fallback(env_path)
+else:
+    print(f"Warning: .env file not found at {env_path}")
 
 # Now get environment variables properly
 BREVO_API_KEY = os.getenv('BREVO_API_KEY')
@@ -34,7 +51,6 @@ if not all([BREVO_API_KEY, DEFAULT_FROM_EMAIL, IPINFO_API_KEY, SECRET_KEY]):
     raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 # Your remaining logic follows...
 
 

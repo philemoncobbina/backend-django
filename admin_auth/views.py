@@ -338,11 +338,8 @@ class LoginView(APIView):
         except CustomUser.DoesNotExist:
             return Response({'error': 'Incorrect username or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Debug: Log the user's role for debugging
-        print(f"User's role: {user.role}")
-
-        # Check if the user has a valid role
-        if user.role not in dict(CustomUser.ROLE_CHOICES):
+        # Check if the user has a valid admin role (principal or staff)
+        if user.role.lower() not in ['principal', 'staff']:
             return Response({'error': 'You are not authorized to access the admin system.'}, status=status.HTTP_403_FORBIDDEN)
 
         # Check if the user is blocked
@@ -363,12 +360,12 @@ class LoginView(APIView):
                 'user': {
                     'id': user.id,
                     'email': user.email,
-                    'role': user.role  # Include the role in the response
+                    'role': user.role
                 }
             })
         else:
             return Response({'error': 'Incorrect username or password.'}, status=status.HTTP_401_UNAUTHORIZED)
-        
+                
                 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
