@@ -88,15 +88,39 @@ class SessionCheckView(APIView):
 # Set up logging
 logger = logging.getLogger(__name__)
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.apps import apps
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
 class AdminUserManagementView(APIView):
-    permission_classes = [IsPrincipalOrSuperuser]
+    permission_classes = [IsPrincipalOrSuperuser]  # or use IsReadOnlyOrPrincipal
 
     def get(self, request, *args, **kwargs):
+        """
+        GET method - accessible by staff (read-only), principals, and superusers
+        """
         users = CustomUser.objects.all()
         serializer = AdminUserSerializer(users, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def patch(self, request, user_id, *args, **kwargs):
+        """
+        PATCH method - only accessible by principals and superusers
+        Staff users will be blocked by the permission class
+        """
+        # Additional explicit check for extra security
+        if not (request.user.is_superuser or request.user.role == 'principal'):
+            logger.warning(f"Unauthorized PATCH attempt by user {request.user.email} with role {request.user.role}")
+            return Response(
+                {'error': 'Permission denied. Only principals can modify users.'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         try:
             user = CustomUser.objects.get(id=user_id)
             logger.info(f"Found user with ID {user_id}: {user.email}")
@@ -105,20 +129,20 @@ class AdminUserManagementView(APIView):
             return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.data.get('action')
-        logger.debug(f"Processing action: {action} for user {user.email}")
+        logger.debug(f"Processing action: {action} for user {user.email} by {request.user.email}")
 
         if action == 'block':
             user.is_blocked = True
             user.is_active = False
             user.save()
-            logger.info(f"User {user.email} blocked successfully")
+            logger.info(f"User {user.email} blocked successfully by {request.user.email}")
             return Response({'message': f'User {user.email} has been blocked.'}, status=status.HTTP_200_OK)
             
         elif action == 'unblock':
             user.is_blocked = False
             user.is_active = True
             user.save()
-            logger.info(f"User {user.email} unblocked successfully")
+            logger.info(f"User {user.email} unblocked successfully by {request.user.email}")
             return Response({'message': f'User {user.email} has been unblocked.'}, status=status.HTTP_200_OK)
             
         elif action == 'edit':
@@ -135,7 +159,7 @@ class AdminUserManagementView(APIView):
                     logger.info(f"Detected class change for student {user.email}: {old_class} -> {new_class}")
                     self._handle_class_change(user, old_class, new_class)
                 
-                logger.info(f"User {user.email} details updated successfully")
+                logger.info(f"User {user.email} details updated successfully by {request.user.email}")
                 return Response({'message': 'User details updated successfully.'}, status=status.HTTP_200_OK)
             
             logger.error(f"Validation errors for user {user.email}: {serializer.errors}")
@@ -144,10 +168,10 @@ class AdminUserManagementView(APIView):
         elif action == 'activate':
             user.is_active = True
             user.save()
-            logger.info(f"User {user.email} activated successfully")
+            logger.info(f"User {user.email} activated successfully by {request.user.email}")
             return Response({'message': f'User {user.email} has been activated.'}, status=status.HTTP_200_OK)
             
-        logger.warning(f"Unknown action received: {action}")
+        logger.warning(f"Unknown action received: {action} by {request.user.email}")
         return Response({'error': 'Invalid action.'}, status=status.HTTP_400_BAD_REQUEST)
     
     def _handle_class_change(self, user, old_class, new_class):
@@ -197,6 +221,18 @@ class AdminUserManagementView(APIView):
             return f"{current_year}-{current_year + 1}"
     
     def delete(self, request, user_id, *args, **kwargs):
+        """
+        DELETE method - only accessible by principals and superusers
+        Staff users will be blocked by the permission class
+        """
+        # Additional explicit check for extra security
+        if not (request.user.is_superuser or request.user.role == 'principal'):
+            logger.warning(f"Unauthorized DELETE attempt by user {request.user.email} with role {request.user.role}")
+            return Response(
+                {'error': 'Permission denied. Only principals can delete users.'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         try:
             user = CustomUser.objects.get(id=user_id)
             logger.info(f"Found user to delete: {user.email}")
@@ -206,9 +242,8 @@ class AdminUserManagementView(APIView):
 
         email = user.email
         user.delete()
-        logger.info(f"User {email} deleted successfully")
+        logger.info(f"User {email} deleted successfully by {request.user.email}")
         return Response({'message': f'User {email} has been deleted successfully.'}, status=status.HTTP_200_OK)
-
 
 class AdminSignUpView(generics.CreateAPIView):
     permission_classes = [IsPrincipalOrSuperuser]  # Ensure the user is logged in

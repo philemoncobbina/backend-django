@@ -234,7 +234,7 @@ class BookListViewSet(viewsets.ModelViewSet):
         
         if not previous_classes:
             return Response({"detail": "No previous class history found (excluding current class)."}, 
-                          status=status.HTTP_404_NOT_FOUND)
+                          status=status.HTTP_200_OK)
         
         # Check for scheduled book lists that should be published
         self.check_and_send_scheduled_emails()

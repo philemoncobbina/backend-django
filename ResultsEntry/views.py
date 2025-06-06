@@ -702,7 +702,7 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
         if not class_name or not term:
             return Response(
                 {"error": "Both class_name and term parameters are required"}, 
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HHTTP_200_OK
             )
         
         self._check_scheduled_results()

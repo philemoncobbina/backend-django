@@ -90,7 +90,6 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from .models import CustomUser
 from .serializers import CustomUserSerializer
-
 from django.utils import timezone
 
 
