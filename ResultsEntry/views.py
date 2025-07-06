@@ -1,34 +1,41 @@
-from rest_framework import viewsets, status, generics, filters
-from rest_framework.response import Response
-from rest_framework.decorators import action
-from django.utils import timezone
-from rest_framework import permissions
-from django.shortcuts import get_object_or_404
-from django.db.models import Q
-from django_filters.rest_framework import DjangoFilterBackend, FilterSet
-from rest_framework.exceptions import ValidationError
 import logging
-from datetime import datetime
-from django_filters import CharFilter, ChoiceFilter
-import pytz
 import os
+from datetime import datetime
+
 from django.conf import settings
+from django.core.files.base import ContentFile
+from django.db import transaction
+from django.db.models import Q, F, Prefetch
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django_filters import CharFilter, ChoiceFilter
+from django_filters.rest_framework import DjangoFilterBackend, FilterSet
+import pytz
+from rest_framework import (
+    viewsets, status, generics, filters,
+    permissions, response, exceptions
+)
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from sib_api_v3_sdk import Configuration, ApiClient, SendSmtpEmail
 from sib_api_v3_sdk.api.transactional_emails_api import TransactionalEmailsApi
 from sib_api_v3_sdk.rest import ApiException
-from authapp.models import CustomUser
-from .permissions import IsStaffOrPrincipal, IsOwnerOrReadOnly, IsOwnerOrStaffOrPrincipal, IsPrincipal, PublishedResultsOnlyPrincipal
-from .models import Course, ClassCourse, Result, CourseResult, ResultChangeLog, ClassSize
-from django.db import transaction
-from django.http import HttpResponse
-from .utils.pdf_generator import generate_report_card_pdf
-from django.core.files.base import ContentFile
 
+from authapp.models import CustomUser
+from .models import Course, ClassCourse, Result, CourseResult, ResultChangeLog, ClassSize
+from .permissions import (
+    IsStaffOrPrincipal, IsOwnerOrReadOnly,
+    IsOwnerOrStaffOrPrincipal, IsPrincipal,
+    PublishedResultsOnlyPrincipal
+)
 from .serializers import (
-    CourseSerializer, ClassCourseSerializer, ClassCourseDetailSerializer, ResultSerializer, ResultCreateSerializer, CourseResultSerializer, ResultChangeLogSerializer, StudentSerializer,
+    CourseSerializer, ClassCourseSerializer,
+    ClassCourseDetailSerializer, ResultSerializer,
+    ResultCreateSerializer, CourseResultSerializer,
+    ResultChangeLogSerializer, StudentSerializer,
     BulkResultUpdateSerializer
 )
-
+from .utils.pdf_generator import generate_report_card_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -93,38 +100,7 @@ class ClassCourseViewSet(viewsets.ModelViewSet):
         return Response(response_data, status=status.HTTP_207_MULTI_STATUS if errors else status.HTTP_201_CREATED)
 
 
-from django.db import transaction
-from django.db.models import Q, F, Prefetch
-from django.utils import timezone
-from django.core.files.base import ContentFile
-from django.conf import settings
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import viewsets, permissions, status, filters
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
-from datetime import datetime
-import pytz
-import os
-import logging
 
-logger = logging.getLogger(__name__)
-
-
-from django.db import transaction
-from django.db.models import Q, F, Prefetch
-from django.utils import timezone
-from django.core.files.base import ContentFile
-from django.conf import settings
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import viewsets, permissions, status, filters
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
-from datetime import datetime
-import pytz
-import os
-import logging
 
 logger = logging.getLogger(__name__)
 class ResultViewSet(viewsets.ModelViewSet):

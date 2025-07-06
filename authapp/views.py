@@ -1,97 +1,52 @@
-from rest_framework import generics, permissions, status
-import requests
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from django.contrib.auth import authenticate, login, logout
-from .serializers import PasswordResetSerializer, PasswordResetConfirmSerializer, ChangePasswordRequestSerializer , CustomUserSerializer , ChangePasswordSerializer
-from django.contrib.auth import get_user_model
-from rest_framework_jwt.settings import api_settings 
-from django.contrib.auth import authenticate, login
-from django.core.mail import send_mail
-from django.urls import reverse
-from django.conf import settings
-from rest_framework_simplejwt.tokens import RefreshToken
-import jwt
-import platform
-import logging
-from django.shortcuts import get_object_or_404, redirect
-import os
-from django.template.loader import render_to_string
-from django.core.mail import EmailMultiAlternatives
-from django.contrib.auth.hashers import check_password
-from django.utils.crypto import get_random_string
-from django.contrib.auth.hashers import make_password
-from rest_framework.permissions import IsAuthenticated, AllowAny
 import base64
-from sib_api_v3_sdk import Configuration, ApiClient, SendSmtpEmail
-from sib_api_v3_sdk.api.transactional_emails_api import TransactionalEmailsApi
-from sib_api_v3_sdk.rest import ApiException
-from django.template.loader import render_to_string
-from geoip2 import database 
-import threading
+import logging
+import os
 import platform
-from rest_framework import generics, permissions, status
-from rest_framework.response import Response
-from authapp.models import CustomUser
-from .serializers import CustomUserSerializer, GoogleSignInSerializer
-from django.core.exceptions import ObjectDoesNotExist
-from rest_framework_social_oauth2.views import ConvertTokenView
-from social_django.utils import load_strategy, load_backend
-from social_core.backends.google import GoogleOAuth2
-from social_core.exceptions import AuthException
-from google.oauth2 import id_token
 import threading
-import requests
-import platform
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from django.contrib.auth import login
-from django.contrib.auth.hashers import check_password
-from django.template.loader import render_to_string
-from django.urls import reverse
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.conf import settings
-from sib_api_v3_sdk import TransactionalEmailsApi, SendSmtpEmail, Configuration, ApiClient
-from sib_api_v3_sdk.rest import ApiException
-from django.db import IntegrityError
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2 import id_token
-from rest_framework.response import Response
-from rest_framework import status, permissions
-from .models import CustomUser
-from .serializers import GoogleSignInSerializer
-from .serializers import CustomUserSerializer
-from google.auth.transport import requests as google_requests
 from pathlib import Path
-import os
-from dotenv import load_dotenv
+
+import jwt
 import requests
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import get_user_model
-from .serializers import GoogleSignInSerializer
-import os
-import platform
-import threading
-import requests
-from django.shortcuts import render
+from django.conf import settings
+from django.contrib.auth import (
+    authenticate, get_user_model, login, logout,
+    hashers
+)
+from django.contrib.auth.hashers import check_password, make_password
+from django.core.exceptions import ObjectDoesNotExist
+from django.core.mail import EmailMultiAlternatives, send_mail
+from django.db import IntegrityError
+from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string, get_template
 from django.urls import reverse
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import login
-from django.contrib.auth.hashers import check_password
-from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
-from .models import CustomUser
-from .serializers import CustomUserSerializer
 from django.utils import timezone
+from django.utils.crypto import get_random_string
+from dotenv import load_dotenv
+from geoip2 import database
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+from rest_framework import generics, permissions, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_jwt.settings import api_settings
+from rest_framework_social_oauth2.views import ConvertTokenView
+from sib_api_v3_sdk import (
+    ApiClient, Configuration, SendSmtpEmail,
+    TransactionalEmailsApi
+)
+from sib_api_v3_sdk.rest import ApiException
+from social_core.backends.google import GoogleOAuth2
+from social_core.exceptions import AuthException
+from social_django.utils import load_backend, load_strategy
 
+from authapp.models import CustomUser
+from .models import CustomUser
+from .serializers import (
+    ChangePasswordRequestSerializer, ChangePasswordSerializer,
+    CustomUserSerializer, GoogleSignInSerializer,
+    PasswordResetConfirmSerializer, PasswordResetSerializer
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
