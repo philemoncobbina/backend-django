@@ -44,7 +44,7 @@ class TicketViewSet(viewsets.ModelViewSet):
 
             return Response(
                 {'detail': 'Ticket submitted successfully!', 'data': serializer.data}, 
-                status=status.HTTP_201_CREATED
+                status=status.HTTP_200_OK
             )
         except Exception as e:
             logger.error(f"Failed to create ticket: {str(e)}", exc_info=True)

@@ -316,3 +316,19 @@ LOGGING = {
     },
 }
 
+# settings.py a
+
+# Media files configuration for PDF storage
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Report card settings
+# Report card settings
+REPORT_CARD_SETTINGS = {
+    'STORAGE_PATH': 'report_cards/',  # Path within MEDIA_ROOT
+    'SCHOOL_NAME': 'RIDOANA COMPREHENSIVE SCHOOL',
+    'SCHOOL_ADDRESS': 'BT 247 TEMA',
+    'SCHOOL_PHONE': '+233 24 123 4567',
+    'SCHOOL_EMAIL': 'philemoncobbina19@gmail.com',
+    'SCHOOL_LOGO_PATH': 'https://img.freepik.com/free-vector/gradient-high-school-logo-design_23-2149626932.jpg',  # School logo URL
+}

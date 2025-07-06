@@ -103,7 +103,7 @@ class StudentBookListSerializer(serializers.ModelSerializer):
         model = BookList
         fields = [
             'id', 'title', 'publish_date', 'academic_year', 'class_name', 'class_name_display',
-            'description', 'calculated_total_price', 'items'
+            'description', 'calculated_total_price', 'items' , 'total_price'
         ]
 
 class StudentClassHistorySerializer(serializers.ModelSerializer):

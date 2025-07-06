@@ -1,5 +1,9 @@
 from django.contrib import admin
 from .models import Course, ClassCourse, Result, CourseResult, ResultChangeLog
+from django.http import HttpResponse
+from django.urls import path
+from django.shortcuts import get_object_or_404, redirect
+from .utils.pdf_generator import generate_report_card_pdf
 
 class ClassCourseInline(admin.TabularInline):
     model = ClassCourse
@@ -39,6 +43,37 @@ class ResultAdmin(admin.ModelAdmin):
     search_fields = ('student__first_name', 'student__last_name', 'student__email')
     inlines = [CourseResultInline, ResultChangeLogInline]
     readonly_fields = ('published_date',)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                '<int:result_id>/generate-pdf/',
+                self.admin_site.admin_view(self.generate_pdf_view),
+                name='generate-pdf',
+            ),
+        ]
+        return custom_urls + urls
+    
+    def generate_pdf_view(self, request, result_id):
+        result = get_object_or_404(Result, id=result_id)
+        
+        try:
+            pdf_content = generate_report_card_pdf(result)
+            filename = result.get_report_card_filename()
+            
+            response = HttpResponse(pdf_content, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            
+            return response
+        except Exception as e:
+            self.message_user(request, f"Error generating PDF: {str(e)}", level='ERROR')
+            return redirect('admin:ResultEntry_result_change', result_id)
+    
+    def response_change(self, request, obj):
+        if "_generate_pdf" in request.POST:
+            return self.generate_pdf_view(request, obj.id)
+        return super().response_change(request, obj)
 
 @admin.register(CourseResult)
 class CourseResultAdmin(admin.ModelAdmin):
