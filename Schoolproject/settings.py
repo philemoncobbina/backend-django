@@ -138,6 +138,16 @@ INSTALLED_APPS = [
     
 ]
 
+# In your settings.py
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+CSRF_COOKIE_SECURE = True
+
+
+
+# Or if using cloud storage like AWS S3
+AWS_S3_SECURE_URLS = True
+AWS_S3_FILE_OVERWRITE = False
 
 
 

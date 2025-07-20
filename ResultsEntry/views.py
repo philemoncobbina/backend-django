@@ -690,8 +690,15 @@ class PositionCalculator:
 
 class PDFGenerator:
     @staticmethod
-    def generate_for_result(result):
-        """Generate PDF for a result with detailed logging"""
+    def generate_for_result(result, serve=False):
+        """Generate PDF for a result with detailed logging
+        Args:
+            result: The result object to generate PDF for
+            serve: If True, returns an HTTP response for serving the PDF
+                   If False, saves the PDF to the result object (default)
+        Returns:
+            HttpResponse if serve=True, bool if serve=False
+        """
         try:
             logger.debug(f"Starting PDF generation for result ID {result.id}")
             result.refresh_from_db()
@@ -702,25 +709,31 @@ class PDFGenerator:
             pdf_content = generate_report_card_pdf(result)
             if not pdf_content:
                 logger.error(f"PDF generation returned empty content for result {result.id}")
-                return False
+                return None if serve else False
             
             filename = result.get_report_card_filename()
             logger.debug(f"Generated filename: {filename}")
             
-            pdf_file = ContentFile(pdf_content, name=filename)
-            
-            # Save the PDF file
-            result.report_card_pdf.save(filename, pdf_file, save=True)
-            logger.info(f"PDF saved successfully for result {result.id} at {result.report_card_pdf.url}")
-            
-            return True
+            if serve:
+                # When serving the PDF, use these headers
+                response = HttpResponse(pdf_content, content_type='application/pdf')
+                response['Content-Disposition'] = f'inline; filename="{filename}"'
+                response['X-Content-Type-Options'] = 'nosniff'
+                response['X-Frame-Options'] = 'ALLOWALL'  # Or specific domains
+                return response
+            else:
+                # Save the PDF file to the result object
+                pdf_file = ContentFile(pdf_content, name=filename)
+                result.report_card_pdf.save(filename, pdf_file, save=True)
+                logger.info(f"PDF saved successfully for result {result.id} at {result.report_card_pdf.url}")
+                return True
             
         except Exception as e:
             logger.error(
                 f"PDF generation error for result {result.id}: {str(e)}",
                 exc_info=True
             )
-            return False
+            return None if serve else False
 
 class EmailNotifier:
     @staticmethod

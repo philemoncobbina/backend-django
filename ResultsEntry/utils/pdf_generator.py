@@ -13,25 +13,21 @@ from datetime import datetime
 import math
 
 
-class NumberedCanvas(canvas.Canvas):
-    """Custom canvas class to add watermark and page numbers to each page"""
+class WatermarkCanvas(canvas.Canvas):
+    """Custom canvas class to add watermark to each page"""
     
     def __init__(self, *args, **kwargs):
         self.status_text = kwargs.pop('status_text', 'DRAFT')
         canvas.Canvas.__init__(self, *args, **kwargs)
-        self._saved_page_states = []
         
     def showPage(self):
-        """Override showPage to add watermark and page number before showing the page"""
+        """Override showPage to add watermark before showing the page"""
         self.draw_watermark()
-        self.add_page_number()
-        self._saved_page_states.append(dict(self.__dict__))
         canvas.Canvas.showPage(self)
         
     def save(self):
-        """Override save to add watermark and page number to the last page"""
+        """Override save to add watermark to the last page"""
         self.draw_watermark()
-        self.add_page_number()
         canvas.Canvas.save(self)
         
     def draw_watermark(self):
@@ -54,30 +50,6 @@ class NumberedCanvas(canvas.Canvas):
         self.translate(x, y)
         self.rotate(45)  # 45-degree diagonal rotation
         self.drawCentredString(0, 0, self.status_text)
-        
-        self.restoreState()
-    
-    def add_page_number(self):
-        """Add page number at the bottom of each page"""
-        self.saveState()
-        
-        # Get page dimensions
-        page_width, page_height = A4
-        
-        # Set page number properties
-        self.setFont("Helvetica", 9)
-        self.setFillColor(colors.grey)
-        
-        # Calculate page number
-        page_num = len(self._saved_page_states) + 1
-        page_text = f"Page {page_num}"
-        
-        # Position at bottom center
-        x = page_width / 2
-        y = 0.5 * inch  # Half inch from bottom
-        
-        # Draw the page number
-        self.drawCentredString(x, y, page_text)
         
         self.restoreState()
 
@@ -177,41 +149,31 @@ class ReportCardPDF:
         ))
     
     def generate_pdf(self):
-        """Generate the complete PDF report card with diagonal watermark and page numbers"""
+        """Generate the complete PDF report card with diagonal watermark"""
         
-        # Create custom document with numbered canvas
+        # Create custom document with watermark canvas
         doc = BaseDocTemplate(
             self.buffer,
             pagesize=A4,
             rightMargin=0.75*inch,
             leftMargin=0.75*inch,
             topMargin=0.75*inch,
-            bottomMargin=1*inch,  # Increased bottom margin for page numbers
-            title=f"Report Card - {self.result.student.first_name} {self.result.student.last_name}",
-            author=getattr(settings, 'REPORT_CARD_SETTINGS', {}).get('SCHOOL_NAME', 'School Administration'),
-            subject=f"Academic Report Card - {self.result.get_term_display()} {self.result.academic_year}",
-            creator="School Management System",
-            keywords=f"report card, {self.result.student.first_name}, {self.result.student.last_name}, {self.result.academic_year}",
-            producer="ReportLab PDF Library"  # Added producer here
+            bottomMargin=0.75*inch
         )
         
-        # Create frame for content (adjusted for page numbers)
+        # Create frame for content
         frame = Frame(
-            0.75*inch, 1*inch,  # Adjusted bottom margin for page numbers
-            A4[0] - 1.5*inch, A4[1] - 1.75*inch,  # Adjusted height
+            0.75*inch, 0.75*inch, 
+            A4[0] - 1.5*inch, A4[1] - 1.5*inch, 
             leftPadding=0, bottomPadding=0, 
             rightPadding=0, topPadding=0
         )
         
-        # Create page template with numbered canvas
-        def build_page(canvas, doc):
-            """Page template function"""
-            pass  # The NumberedCanvas handles watermark and page numbers
-        
+        # Create page template with diagonal watermark
         template = PageTemplate(
-            id='numbered_template',
+            id='diagonal_watermark_template',
             frames=[frame],
-            onPage=build_page
+            onPage=self._add_diagonal_watermark
         )
         
         doc.addPageTemplates([template])
@@ -242,17 +204,46 @@ class ReportCardPDF:
         # Add footer
         story.extend(self._build_footer())
         
-        # Build the PDF with custom canvas
-        doc.build(
-            story, 
-            canvasmaker=lambda *args, **kwargs: NumberedCanvas(
-                *args, 
-                status_text=self.status_text, 
-                **kwargs
-            )
-        )
+        # Build the PDF
+        doc.build(story)
         
         return self.buffer.getvalue()
+    
+    def _add_diagonal_watermark(self, canvas, doc):
+        """Add large diagonal watermark to each page"""
+        canvas.saveState()
+        
+        # Get page dimensions
+        page_width, page_height = A4
+        
+        # Set watermark properties - large diagonal text
+        font_size = 100
+        canvas.setFont("Helvetica-Bold", font_size)
+        
+        # Use a more visible but non-intrusive color
+        canvas.setFillColor(colors.Color(0.8, 0.8, 0.8, alpha=0.35))
+        
+        # Calculate the diagonal position to span across the page
+        # Position the watermark to run diagonally from bottom-left to top-right area
+        x = page_width / 2
+        y = page_height / 2
+        
+        # Apply transformations for diagonal placement
+        canvas.translate(x, y)
+        canvas.rotate(45)  # 45-degree diagonal rotation
+        
+        # Draw the watermark text centered
+        canvas.drawCentredString(0, 0, self.status_text)
+        
+        # Optional: Add a second, smaller watermark for better coverage
+        canvas.setFont("Helvetica-Bold", 60)
+        canvas.setFillColor(colors.Color(0.9, 0.9, 0.9, alpha=0.25))
+        
+        # Add smaller watermarks in corners for better visual effect
+        canvas.drawCentredString(-150, -100, self.status_text)
+        canvas.drawCentredString(150, 100, self.status_text)
+        
+        canvas.restoreState()
     
     def _build_status_badge(self):
         """Build a smaller status badge (since we now have watermark)"""
@@ -588,8 +579,8 @@ class ReportCardPDF:
         
         elements.append(signature_table)
         
-        # Generation timestamp (moved higher to avoid page number conflict)
-        elements.append(Spacer(1, 0.15*inch))
+        # Generation timestamp
+        elements.append(Spacer(1, 0.3*inch))
         generation_time = datetime.now().strftime('%B %d, %Y at %I:%M %p')
         elements.append(Paragraph(f"Generated on {generation_time}", self.styles['FooterText']))
         
@@ -598,7 +589,7 @@ class ReportCardPDF:
 
 def generate_report_card_pdf(result):
     """
-    Generate a professional PDF report card for a given result with diagonal watermark status and page numbers
+    Generate a professional PDF report card for a given result with diagonal watermark status
     Returns the PDF file content as bytes
     """
     try:
