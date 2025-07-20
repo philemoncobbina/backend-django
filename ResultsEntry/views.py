@@ -17,6 +17,7 @@ from rest_framework import (
 )
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 from sib_api_v3_sdk import Configuration, ApiClient, SendSmtpEmail
 from sib_api_v3_sdk.api.transactional_emails_api import TransactionalEmailsApi
 from sib_api_v3_sdk.rest import ApiException
@@ -496,6 +497,7 @@ class ResultViewSet(viewsets.ModelViewSet):
             return 0
         
         updated_classes_terms = set()
+        published_results = []  # Track published results for PDF regeneration
         
         with transaction.atomic():
             for result in scheduled_results:
@@ -504,15 +506,25 @@ class ResultViewSet(viewsets.ModelViewSet):
                 result.save(update_fields=['status', 'published_date'])
                 
                 updated_classes_terms.add((result.class_name, result.term, result.academic_year))
+                published_results.append(result)  # Add to list for PDF regeneration
                 EmailNotifier.send_result_published(result)
         
-        # Recalculate positions for affected classes
+        # Recalculate positions for affected classes and regenerate PDFs
         for class_info in updated_classes_terms:
-            PositionCalculator.recalculate_positions(*class_info)
+            changed_result_ids = PositionCalculator.recalculate_positions(*class_info)
+            
+            # Regenerate PDFs for ALL results in this class/term since positions may have changed
+            # and the newly published results need updated PDFs with correct status
+            self._regenerate_pdfs_for_all_results_in_class(
+                class_info[0],  # class_name
+                class_info[1],  # term
+                class_info[2],  # academic_year
+                changed_result_ids=changed_result_ids
+            )
         
         count = len(scheduled_results)
         if count > 0:
-            logger.info(f"Auto-published {count} scheduled results")
+            logger.info(f"Auto-published {count} scheduled results and regenerated PDFs")
         
         return count
 
