@@ -158,7 +158,13 @@ class ReportCardPDF:
             rightMargin=0.75*inch,
             leftMargin=0.75*inch,
             topMargin=0.75*inch,
-            bottomMargin=0.75*inch
+            bottomMargin=0.75*inch,
+            # Add PDF metadata
+            title=f"Report Card - {self.result.student.first_name} {self.result.student.last_name}",
+            author=getattr(settings, 'REPORT_CARD_SETTINGS', {}).get('SCHOOL_NAME', 'School'),
+            subject=f"Academic Report - {self.result.get_term_display()} {self.result.academic_year}",
+            creator="School Management System",
+            keywords="report card, student, academic, performance"
         )
         
         # Create frame for content
@@ -169,11 +175,11 @@ class ReportCardPDF:
             rightPadding=0, topPadding=0
         )
         
-        # Create page template with diagonal watermark
+        # Create page template with diagonal watermark and page numbers
         template = PageTemplate(
             id='diagonal_watermark_template',
             frames=[frame],
-            onPage=self._add_diagonal_watermark
+            onPage=self._add_diagonal_watermark_and_page_number
         )
         
         doc.addPageTemplates([template])
@@ -209,8 +215,9 @@ class ReportCardPDF:
         
         return self.buffer.getvalue()
     
-    def _add_diagonal_watermark(self, canvas, doc):
-        """Add large diagonal watermark to each page"""
+    def _add_diagonal_watermark_and_page_number(self, canvas, doc):
+        """Add large diagonal watermark and page numbers to each page"""
+        # Add watermark
         canvas.saveState()
         
         # Get page dimensions
@@ -243,6 +250,14 @@ class ReportCardPDF:
         canvas.drawCentredString(-150, -100, self.status_text)
         canvas.drawCentredString(150, 100, self.status_text)
         
+        canvas.restoreState()
+        
+        # Add page numbers
+        canvas.saveState()
+        canvas.setFont("Helvetica", 9)
+        canvas.setFillColor(colors.black)
+        page_text = f"Page {doc.page} of {doc.canv._pageNumber}"
+        canvas.drawRightString(page_width - 0.75*inch, 0.5*inch, page_text)
         canvas.restoreState()
     
     def _build_status_badge(self):
