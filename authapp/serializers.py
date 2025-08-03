@@ -4,11 +4,16 @@ from google.oauth2 import id_token
 from google.auth.transport import requests
 
 class CustomUserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, required=False)  # Make password optional
+    role = serializers.CharField(read_only=True)  # Make role read-only
 
     class Meta:
         model = CustomUser
-        fields = ('id', 'email', 'first_name', 'last_name', 'password', 'is_active', 'is_blocked', 'date_joined', 'class_name' )
+        fields = ('id', 'email', 'first_name', 'last_name', 'password', 'is_active', 
+                 'is_blocked', 'date_joined', 'class_name', 'role', 'index_number', 'username',)
+        extra_kwargs = {
+            'role': {'required': False}  # Ensure role isn't required during creation
+        }
 
     def create(self, validated_data):
         password = validated_data.pop('password', None)

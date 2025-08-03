@@ -7,7 +7,7 @@ class StudentUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ['email', 'username', 'first_name', 'last_name', 'password', 
-                  'index_number', 'class_name']
+                  'index_number', 'class_name' , 'role']
         extra_kwargs = {
             'index_number': {'required': True},
             'class_name': {'required': True},

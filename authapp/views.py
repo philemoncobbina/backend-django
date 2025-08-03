@@ -638,11 +638,17 @@ class ChangePasswordView(APIView):
             old_password = serializer.validated_data['old_password']
             new_password = serializer.validated_data['new_password']
             
+            # Check verification code first
             if user.verification_code != verification_code:
                 return Response({'error': 'Invalid verification code.'}, status=status.HTTP_400_BAD_REQUEST)
             
+            # Check old password with specific error message
             if not user.check_password(old_password):
-                return Response({'error': 'Invalid old password.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'Current password is incorrect. Please enter your correct current password.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Additional validation for new password
+            if old_password == new_password:
+                return Response({'error': 'New password must be different from your current password.'}, status=status.HTTP_400_BAD_REQUEST)
             
             user.set_password(new_password)
             user.verification_code = None  # Clear the verification code after successful reset
@@ -658,11 +664,13 @@ class VerifyChangePasswordCodeView(APIView):
     def post(self, request, *args, **kwargs):
         user = request.user
         verification_code = request.data.get('verification_code')
+        
+        if not verification_code:
+            return Response({'error': 'Verification code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
         if user.verification_code == verification_code:
             return Response({'message': 'Verification code is valid.'}, status=status.HTTP_200_OK)
-        return Response({'error': 'Invalid verification code.'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    
+        return Response({'error': 'Invalid verification code. Please check your email and try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
 class LogoutView(APIView):
     permission_classes = [permissions.IsAuthenticated]
