@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/', include('momo_pay.urls')),
     path('api/', include('hubtel.urls')),
     path('api/', include('Reservationapp.urls')),
+    path('api/', include('student_billing.urls')),
     path('api/', include('tickets.urls')),
     path('api/', include('student_auth.urls')),
     path('api/', include('Subscriptions.urls')),
