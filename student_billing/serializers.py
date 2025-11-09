@@ -417,6 +417,7 @@ class StudentBillSummarySerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     class_term = serializers.SerializerMethodField()
     current_bill_balance = serializers.SerializerMethodField()
+    balance_due = serializers.SerializerMethodField()  # FIXED: Added this field
     
     class Meta:
         model = StudentBill
@@ -439,3 +440,9 @@ class StudentBillSummarySerializer(serializers.ModelSerializer):
         Calculate current bill balance
         """
         return float(obj.total_amount_due - obj.total_paid)
+    
+    def get_balance_due(self, obj):
+        """
+        Calculate total outstanding balance (previous arrears + current bill balance)
+        """
+        return float(obj.balance_due)
