@@ -805,8 +805,10 @@ class StudentMyBillsView(generics.ListAPIView):
         current_balance = 0
         
         if serializer.data:
-            current_balance = float(serializer.data[0]['balance_due'])
-            total_paid = sum(float(bill['total_paid']) for bill in serializer.data)
+            # Use 'total_outstanding' instead of 'balance_due'
+            # This field exists in StudentBillSerializer as a SerializerMethodField
+            current_balance = float(serializer.data[0].get('total_outstanding', 0))
+            total_paid = sum(float(bill.get('total_paid', 0)) for bill in serializer.data)
             total_outstanding = current_balance
         
         return Response({
@@ -816,12 +818,12 @@ class StudentMyBillsView(generics.ListAPIView):
                 'total_bills': len(serializer.data),
                 'total_outstanding_balance': total_outstanding,
                 'total_paid': total_paid,
-                'paid_bills': len([b for b in serializer.data if b['payment_status'] == 'paid']),
-                'overdue_bills': len([b for b in serializer.data if b['is_overdue']])
+                'paid_bills': len([b for b in serializer.data if b.get('payment_status') == 'paid']),
+                'overdue_bills': len([b for b in serializer.data if b.get('is_overdue', False)])
             },
             'bills': serializer.data
         })
-
+    
 
 class StudentCurrentClassBillsView(generics.ListAPIView):
     """
