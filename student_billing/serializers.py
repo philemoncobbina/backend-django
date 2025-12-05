@@ -6,6 +6,9 @@ from .models import (
     CustomCharge, PaymentReceipt, BillingItemLog
 )
 from authapp.models import CustomUser
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BillingItemLogSerializer(serializers.ModelSerializer):
@@ -30,14 +33,18 @@ class BillingItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_date', 'created_by', 'logs']
 
     def update(self, instance, validated_data):
-        """Override update to set user context for logging"""
+        """Override update to set user context for logging and trigger PDF regeneration"""
         user = self.context['request'].user
         instance._current_user = user
         
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         
+        # Save will trigger signal that regenerates PDFs for all related bills
         instance.save()
+        
+        logger.info(f"🔄 BILLING ITEM UPDATED - '{instance.item_name}' - PDFs will be regenerated via signal")
+        
         return instance
 
 
@@ -52,6 +59,21 @@ class BillingTemplateSerializer(serializers.ModelSerializer):
             'created_by', 'due_date', 'billing_items'
         ]
         read_only_fields = ['id', 'created_date', 'created_by']
+
+    def update(self, instance, validated_data):
+        """Override update to trigger PDF regeneration for all related bills"""
+        old_due_date = instance.due_date
+        
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # Save will trigger signal that regenerates PDFs if due_date changed
+        instance.save()
+        
+        if old_due_date != instance.due_date:
+            logger.info(f"🔄 BILLING TEMPLATE UPDATED - Due date changed - PDFs will be regenerated via signal")
+        
+        return instance
 
 
 class CustomChargeSerializer(serializers.ModelSerializer):
@@ -75,21 +97,28 @@ class PaymentReceiptSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_by']
 
     def create(self, validated_data):
+        """Create payment receipt - PDF regeneration happens in model save"""
         validated_data['created_by'] = self.context['request'].user
         receipt = PaymentReceipt(**validated_data)
         receipt._current_user = self.context['request'].user
-        receipt.save()
+        receipt.save()  # This triggers PDF regeneration via model save
+        
+        logger.info(f"📄 PAYMENT RECEIPT CREATED - {receipt.receipt_number} - PDF regenerated")
+        
         return receipt
 
     def update(self, instance, validated_data):
-        """Override update to set user context for logging and cascading updates"""
+        """Override update to set user context for logging and cascading updates with PDF regeneration"""
         user = self.context['request'].user
         instance._current_user = user
         
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         
-        instance.save()
+        instance.save()  # This triggers PDF regeneration via model save
+        
+        logger.info(f"🔄 PAYMENT RECEIPT UPDATED - {instance.receipt_number} - PDF regenerated")
+        
         return instance
 
 
@@ -112,6 +141,7 @@ class StudentBillSerializer(serializers.ModelSerializer):
     
     current_bill_balance = serializers.SerializerMethodField()
     total_outstanding = serializers.SerializerMethodField()
+    pdf_url = serializers.SerializerMethodField()
 
     class Meta:
         model = StudentBill
@@ -121,24 +151,23 @@ class StudentBillSerializer(serializers.ModelSerializer):
             'discount_reason', 'discount_approved_by', 'status', 'payment_status', 
             'generated_date', 'scheduled_date', 'due_date', 'created_date', 'created_by',
             'total_amount_due', 'total_paid', 'notes', 'custom_charges', 
-            'payment_receipts', 'logs', 'current_bill_balance', 'total_outstanding'
+            'payment_receipts', 'logs', 'current_bill_balance', 'total_outstanding',
+            'pdf_file', 'pdf_url'
         ]
         read_only_fields = [
             'id', 'bill_number', 'first_name', 'last_name', 'generated_date',
             'created_date', 'created_by', 'total_amount_due',
             'balance_due', 'is_overdue', 'payment_receipts', 
-            'logs', 'previous_arrears', 'total_paid', 'current_bill_balance', 'total_outstanding'
+            'logs', 'previous_arrears', 'total_paid', 'current_bill_balance', 
+            'total_outstanding', 'pdf_file', 'pdf_url'
         ]
 
     def validate(self, data):
-        """
-        Validate that discount_reason and discount_approved_by are provided when discount_amount is set
-        """
+        """Validate that discount_reason and discount_approved_by are provided when discount_amount is set"""
         discount_amount = data.get('discount_amount', getattr(self.instance, 'discount_amount', Decimal('0.00')))
         discount_reason = data.get('discount_reason', getattr(self.instance, 'discount_reason', ''))
         discount_approved_by = data.get('discount_approved_by', getattr(self.instance, 'discount_approved_by', ''))
         
-        # If discount is being applied (greater than 0)
         if discount_amount and discount_amount > Decimal('0.00'):
             if not discount_reason or not discount_reason.strip():
                 raise serializers.ValidationError({
@@ -152,22 +181,25 @@ class StudentBillSerializer(serializers.ModelSerializer):
         return data
 
     def get_current_bill_balance(self, obj):
-        """
-        Calculate current bill balance from fresh database values
-        """
+        """Calculate current bill balance from fresh database values"""
         return float(obj.total_amount_due - obj.total_paid)
     
     def get_total_outstanding(self, obj):
-        """
-        Calculate total outstanding balance from fresh database values
-        """
+        """Calculate total outstanding balance from fresh database values"""
         return float(obj.balance_due)
+    
+    def get_pdf_url(self, obj):
+        """Get PDF URL if available"""
+        if obj.pdf_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.pdf_file.url)
+            return obj.pdf_file.url
+        return None
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        """
-        Handle updates with proper custom charges management and logging
-        """
+        """Handle updates with proper custom charges management, logging, and PDF regeneration"""
         user = self.context['request'].user
         instance._current_user = user
 
@@ -178,28 +210,33 @@ class StudentBillSerializer(serializers.ModelSerializer):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
 
-        # Handle custom charges updates WITH PROPER LOGGING
+        # Handle custom charges updates WITH PROPER LOGGING AND PDF REGENERATION
         if custom_charges_data is not None:
+            logger.info(f"🔄 Updating custom charges for bill {instance.bill_number}")
             self.update_custom_charges(instance, custom_charges_data, user)
+            # Refresh instance to get latest custom charges
+            instance.refresh_from_db()
 
-        # Save will trigger recalculation and cascading updates
+        # Save will trigger recalculation, cascading updates, and PDF regeneration
         instance.save()
+        
+        logger.info(f"✅ Bill {instance.bill_number} updated - PDF regenerated")
         
         return instance
 
     def update_custom_charges(self, bill_instance, custom_charges_data, user):
-        """
-        Handle custom charges: create new, update existing, delete removed
-        """
+        """Handle custom charges: create new, update existing, delete removed - TRIGGERS PDF REGENERATION"""
         # Get existing custom charges mapped by ID
         existing_charges = {charge.id: charge for charge in bill_instance.custom_charges.all()}
         existing_charge_ids = set(existing_charges.keys())
         
         # Track which charge IDs are being kept (provided in the request)
         provided_charge_ids = set()
+        
+        logger.info(f"📋 Processing {len(custom_charges_data)} custom charges for bill {bill_instance.bill_number}")
 
         # Process each charge in request data
-        for charge_data in custom_charges_data:
+        for idx, charge_data in enumerate(custom_charges_data):
             # Get the ID from the charge data
             charge_id = charge_data.get('id')
             
@@ -239,12 +276,14 @@ class StudentBillSerializer(serializers.ModelSerializer):
                 
                 # Only update and log if there are real changes
                 if has_changes:
+                    logger.info(f"  🔄 Updating custom charge ID {charge_id}: {old_charge_name} -> {new_charge_name}")
+                    
                     # Update the charge fields
                     charge.charge_name = new_charge_name
                     charge.description = new_description
                     charge.amount = new_amount
                     charge._current_user = user
-                    charge.save()
+                    charge.save()  # This will trigger PDF regeneration via model save
                     
                     # Create formatted old and new summaries for logging
                     old_summary = f"{old_charge_name}"
@@ -267,9 +306,13 @@ class StudentBillSerializer(serializers.ModelSerializer):
                         user_last_name=user.last_name,
                         user_email=user.email
                     )
+                else:
+                    logger.info(f"  ℹ️  No changes detected for custom charge ID {charge_id}")
             
             # CASE 2: CREATE NEW CHARGE
             else:
+                logger.info(f"  ➕ Creating new custom charge: {charge_data.get('charge_name', 'Unknown')}")
+                
                 # Remove 'id' key if present
                 charge_data_clean = {k: v for k, v in charge_data.items() if k != 'id'}
                 
@@ -280,7 +323,7 @@ class StudentBillSerializer(serializers.ModelSerializer):
                     **charge_data_clean
                 )
                 new_charge._current_user = user
-                new_charge.save()
+                new_charge.save()  # This will trigger PDF regeneration via model save
                 
                 # Log the creation
                 charge_summary = f"{new_charge.charge_name}"
@@ -301,14 +344,21 @@ class StudentBillSerializer(serializers.ModelSerializer):
         # CASE 3: DELETE CHARGES NOT IN REQUEST
         charges_to_delete_ids = existing_charge_ids - provided_charge_ids
         
+        if charges_to_delete_ids:
+            logger.info(f"  🗑️  Deleting {len(charges_to_delete_ids)} custom charges")
+        
         for charge_id_to_delete in charges_to_delete_ids:
             charge_to_delete = existing_charges[charge_id_to_delete]
+            
+            logger.info(f"    ❌ Deleting custom charge: {charge_to_delete.charge_name}")
             
             # Set user context for deletion logging
             charge_to_delete._current_user = user
             
-            # Delete will trigger the post_delete signal which logs the removal
+            # Delete will trigger the post_delete signal which logs the removal and regenerates PDF
             charge_to_delete.delete()
+        
+        logger.info(f"✅ Custom charges update complete for bill {bill_instance.bill_number}")
 
 
 class StudentBillCreateSerializer(serializers.ModelSerializer):
@@ -323,10 +373,7 @@ class StudentBillCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        """
-        Validate that the combination of student and billing_template doesn't already exist
-        and that discount fields are provided when discount is applied
-        """
+        """Validate that the combination doesn't exist and discount fields are provided"""
         student = data.get('student')
         billing_template = data.get('billing_template')
         
@@ -360,18 +407,23 @@ class StudentBillCreateSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        """Override create to set user context and handle custom charges WITH LOGGING"""
+        """Override create to set user context and handle custom charges WITH LOGGING AND PDF GENERATION"""
         user = self.context['request'].user
         custom_charges_data = validated_data.pop('custom_charges', [])
         
         validated_data['created_by'] = user
         
         try:
-            # Create the bill with atomic transaction
+            logger.info(f"🆕 Creating new bill for student {validated_data['student'].first_name} {validated_data['student'].last_name}")
+            
+            # Create the bill with atomic transaction (PDF will be auto-generated in model save)
             bill = StudentBill.objects.create(**validated_data)
             bill._current_user = user
             
             # Create custom charges if provided WITH LOGGING
+            if custom_charges_data:
+                logger.info(f"  ➕ Adding {len(custom_charges_data)} custom charges to new bill")
+                
             for charge_data in custom_charges_data:
                 new_charge = CustomCharge(
                     student_bill=bill,
@@ -379,7 +431,7 @@ class StudentBillCreateSerializer(serializers.ModelSerializer):
                     **charge_data
                 )
                 new_charge._current_user = user
-                new_charge.save()
+                new_charge.save()  # This will trigger PDF regeneration via model save
                 
                 # Log the creation
                 charge_summary = f"{new_charge.charge_name}"
@@ -396,10 +448,15 @@ class StudentBillCreateSerializer(serializers.ModelSerializer):
                     user_last_name=user.last_name,
                     user_email=user.email
                 )
+                
+                logger.info(f"    ✅ Added custom charge: {new_charge.charge_name}")
+            
+            logger.info(f"✅ Bill {bill.bill_number} created successfully with PDF")
             
             return bill
             
         except Exception as e:
+            logger.error(f"❌ Error creating bill: {str(e)}")
             if 'UNIQUE constraint failed' in str(e):
                 if 'bill_number' in str(e):
                     raise serializers.ValidationError(
@@ -417,7 +474,8 @@ class StudentBillSummarySerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     class_term = serializers.SerializerMethodField()
     current_bill_balance = serializers.SerializerMethodField()
-    balance_due = serializers.SerializerMethodField()  # FIXED: Added this field
+    balance_due = serializers.SerializerMethodField()
+    pdf_url = serializers.SerializerMethodField()
     
     class Meta:
         model = StudentBill
@@ -426,7 +484,7 @@ class StudentBillSummarySerializer(serializers.ModelSerializer):
             'total_amount_due', 'total_paid', 'current_bill_balance',
             'previous_arrears', 'balance_due', 'payment_status',
             'due_date', 'is_overdue', 'generated_date', 'discount_amount',
-            'discount_reason', 'discount_approved_by'
+            'discount_reason', 'discount_approved_by', 'pdf_url'
         ]
     
     def get_student_name(self, obj):
@@ -436,13 +494,18 @@ class StudentBillSummarySerializer(serializers.ModelSerializer):
         return f"{obj.billing_template.class_name} - {obj.billing_template.get_term_display()}"
     
     def get_current_bill_balance(self, obj):
-        """
-        Calculate current bill balance
-        """
+        """Calculate current bill balance"""
         return float(obj.total_amount_due - obj.total_paid)
     
     def get_balance_due(self, obj):
-        """
-        Calculate total outstanding balance (previous arrears + current bill balance)
-        """
+        """Calculate total outstanding balance (previous arrears + current bill balance)"""
         return float(obj.balance_due)
+    
+    def get_pdf_url(self, obj):
+        """Get PDF URL if available"""
+        if obj.pdf_file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.pdf_file.url)
+            return obj.pdf_file.url
+        return None

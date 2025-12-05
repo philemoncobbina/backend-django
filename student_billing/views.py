@@ -321,7 +321,7 @@ class BillingItemDetailView(generics.RetrieveUpdateDestroyAPIView):
             user_email=self.request.user.email
         )
         
-        # The post_delete signal will handle recalculation
+        # The post_delete signal will handle recalculation and PDF regeneration
         instance.delete()
 
 # --------------------
@@ -350,8 +350,15 @@ class PaymentReceiptListCreateView(generics.ListCreateAPIView):
         return PaymentReceipt.objects.all()
 
     def perform_create(self, serializer):
-        """Set user context when creating payment receipts and send email"""
+        """Set user context when creating payment receipts, send email, and log PDF regeneration"""
         receipt = serializer.save()
+        
+        # Log PDF regeneration after payment
+        bill = receipt.student_bill
+        if bill.pdf_file:
+            logger.info(f"✅ Payment receipt {receipt.receipt_number} added - Bill {bill.bill_number} PDF regenerated: {bill.pdf_file.name}")
+        else:
+            logger.warning(f"⚠️ Payment receipt {receipt.receipt_number} added but bill {bill.bill_number} PDF may not exist")
         
         # Send payment receipt email
         BillingEmailService.send_payment_receipt_email(receipt)
@@ -364,13 +371,18 @@ class PaymentReceiptDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):
         """Set user context when updating payment receipts for logging"""
         receipt = serializer.save()
+        
+        # Log PDF regeneration after payment update
+        bill = receipt.student_bill
+        if bill.pdf_file:
+            logger.info(f"✅ Payment receipt {receipt.receipt_number} updated - Bill {bill.bill_number} PDF regenerated")
 
     def perform_destroy(self, instance):
         """Set user context and log deletion before deleting payment receipt"""
         # Set user context for deletion logging
         instance._current_user = self.request.user
         
-        # The post_delete signal will handle logging and recalculation
+        # The post_delete signal will handle logging, recalculation, and PDF regeneration
         instance.delete()
 
 # --------------------
@@ -424,6 +436,19 @@ class StudentBillCreateView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         try:
             response = super().create(request, *args, **kwargs)
+            
+            # Log PDF generation status
+            bill_id = response.data.get('id')
+            if bill_id:
+                try:
+                    bill = StudentBill.objects.get(id=bill_id)
+                    if bill.pdf_file:
+                        logger.info(f"✅ Bill {bill.bill_number} created successfully with PDF: {bill.pdf_file.name}")
+                    else:
+                        logger.warning(f"⚠️ Bill {bill.bill_number} created but PDF generation may have failed")
+                except StudentBill.DoesNotExist:
+                    logger.error(f"❌ Bill with ID {bill_id} not found after creation")
+            
             return Response({
                 'success': True,
                 'message': 'Bill created successfully',
@@ -505,6 +530,12 @@ class StudentBillDetailView(generics.RetrieveUpdateDestroyAPIView):
         
         bill = serializer.save()
         
+        # Log PDF regeneration
+        if bill.pdf_file:
+            logger.info(f"✅ Bill {bill.bill_number} updated successfully - PDF regenerated: {bill.pdf_file.name}")
+        else:
+            logger.warning(f"⚠️ Bill {bill.bill_number} updated but PDF may not exist")
+        
         # Send email if status changed to PUBLISHED (from any previous status)
         if old_status != 'PUBLISHED' and bill.status == 'PUBLISHED':
             BillingEmailService.send_bill_published_email(bill)
@@ -527,9 +558,13 @@ class StudentBillDetailView(generics.RetrieveUpdateDestroyAPIView):
         student = instance.student
         generated_date = instance.generated_date
         
+        # Log PDF deletion
+        if instance.pdf_file:
+            logger.info(f"🗑️ Deleting bill {instance.bill_number} - PDF file {instance.pdf_file.name} will be removed")
+        
         instance.delete()
         
-        # Recalculate subsequent bills for this student
+        # Recalculate subsequent bills for this student (PDFs will be regenerated)
         subsequent_bills = StudentBill.objects.filter(
             student=student,
             generated_date__gt=generated_date
@@ -570,6 +605,10 @@ class PublishBillView(APIView):
             bill.status = 'PUBLISHED'
             bill._current_user = request.user
             bill.save(update_fields=['status'])
+            
+            # Log PDF status after publishing
+            if bill.pdf_file:
+                logger.info(f"✅ Bill {bill.bill_number} published - PDF available: {bill.pdf_file.name}")
             
             # Send email notification
             email_sent = BillingEmailService.send_bill_published_email(bill)
@@ -628,7 +667,8 @@ class BulkPublishBillsView(APIView):
                     published_bills.append({
                         'id': bill.id,
                         'bill_number': bill.bill_number,
-                        'email_sent': email_sent
+                        'email_sent': email_sent,
+                        'pdf_available': bool(bill.pdf_file)
                     })
                 elif bill.status == 'PUBLISHED':
                     failed_bills.append({
@@ -683,6 +723,7 @@ def recalculate_student_balances(request):
     """
     Force recalculation of all student balances.
     Useful for fixing any inconsistencies.
+    PDFs will be regenerated for changed bills.
     """
     student_id = request.data.get('student_id')
     
@@ -705,6 +746,11 @@ def recalculate_student_balances(request):
                 payment_status=bill.payment_status
             )
             updated_count += 1
+            
+            # Regenerate PDF for changed bills
+            bill.generate_pdf()
+    
+    logger.info(f"✅ Recalculated {updated_count} bills with PDF regeneration")
     
     return Response({
         'message': f'Successfully recalculated {updated_count} bills',
@@ -750,7 +796,8 @@ def student_balance_summary(request, student_id):
             'balance_due_at_time': float(bill.balance_due),
             'payment_status': bill.payment_status,
             'due_date': bill.due_date,
-            'is_overdue': bill.is_overdue
+            'is_overdue': bill.is_overdue,
+            'pdf_url': request.build_absolute_uri(bill.pdf_file.url) if bill.pdf_file else None
         })
     
     return Response({
@@ -783,6 +830,7 @@ class StudentOnlyPermission(permissions.BasePermission):
 class StudentMyBillsView(generics.ListAPIView):
     """
     Simplified API for students to view all their published bills.
+    Includes PDF URLs for download.
     """
     serializer_class = StudentBillSerializer
     permission_classes = [StudentOnlyPermission]
@@ -828,6 +876,7 @@ class StudentMyBillsView(generics.ListAPIView):
 class StudentCurrentClassBillsView(generics.ListAPIView):
     """
     API for students to view bills for their current class only.
+    Includes PDF URLs for download.
     """
     serializer_class = StudentBillSerializer
     permission_classes = [StudentOnlyPermission]
@@ -844,6 +893,7 @@ class StudentCurrentClassBillsView(generics.ListAPIView):
 class StudentPreviousClassBillsView(generics.ListAPIView):
     """
     API for students to view bills from their previous classes.
+    Includes PDF URLs for download.
     """
     serializer_class = StudentBillSerializer
     permission_classes = [StudentOnlyPermission]
@@ -867,6 +917,7 @@ def bulk_payment_update(request):
     """
     Update multiple payment receipts at once.
     Useful for bulk payment processing.
+    PDFs will be regenerated for affected bills.
     """
     updates = request.data.get('updates', [])
     updated_receipts = []
@@ -885,8 +936,10 @@ def bulk_payment_update(request):
                 if field != 'id' and hasattr(receipt, field):
                     setattr(receipt, field, value)
             
-            receipt.save()  # This will trigger cascading updates
+            receipt.save()  # This will trigger cascading updates and PDF regeneration
             updated_receipts.append(receipt.id)
+            
+            logger.info(f"✅ Payment receipt {receipt.receipt_number} updated - Bill PDF regenerated")
             
         except PaymentReceipt.DoesNotExist:
             continue

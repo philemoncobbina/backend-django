@@ -5,6 +5,10 @@ from decimal import Decimal
 from authapp.models import CustomUser
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.core.files.base import ContentFile
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BillingTemplate(models.Model):
@@ -197,6 +201,14 @@ class StudentBill(models.Model):
     total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
 
     notes = models.TextField(blank=True, null=True)
+    
+    # PDF file field
+    pdf_file = models.FileField(
+        upload_to='student_bills/%Y/%m/',
+        blank=True,
+        null=True,
+        help_text="Auto-generated PDF bill"
+    )
 
     class Meta:
         unique_together = ['student', 'billing_template']
@@ -210,6 +222,8 @@ class StudentBill(models.Model):
         is_new = self.pk is None
         old_total_paid = Decimal('0.00')
         old_discount = Decimal('0.00')
+        should_regenerate_pdf = is_new
+        skip_pdf_generation = kwargs.pop('skip_pdf_generation', False)
         
         if not is_new:
             old_bill = StudentBill.objects.get(pk=self.pk)
@@ -224,6 +238,18 @@ class StudentBill(models.Model):
                 'total_paid': str(old_bill.total_paid),
                 'notes': old_bill.notes or '',
             }
+            
+            # Check if ANY field that affects PDF changed
+            if (old_bill.discount_amount != self.discount_amount or
+                old_bill.discount_reason != self.discount_reason or
+                old_bill.discount_approved_by != self.discount_approved_by or
+                old_bill.status != self.status or
+                old_bill.payment_status != self.payment_status or
+                old_bill.notes != self.notes or
+                old_bill.total_paid != self.total_paid or
+                old_bill.total_amount_due != self.total_amount_due or
+                old_bill.previous_arrears != self.previous_arrears):
+                should_regenerate_pdf = True
 
         if not self.bill_number:
             self.bill_number = self.generate_unique_bill_number()
@@ -252,6 +278,11 @@ class StudentBill(models.Model):
                 total_amount_due=self.total_amount_due,
                 previous_arrears=self.previous_arrears
             )
+            
+            # Generate PDF for new bill
+            if not skip_pdf_generation:
+                self.generate_pdf()
+                logger.info(f"📄 NEW BILL - PDF generated for {self.bill_number}")
         else:
             self.recalculate_amounts()
             super().save(*args, **kwargs)
@@ -259,9 +290,40 @@ class StudentBill(models.Model):
             if old_values:
                 self.create_change_logs(old_values)
             
+            # Regenerate PDF if needed
+            if should_regenerate_pdf and not skip_pdf_generation:
+                self.generate_pdf()
+                logger.info(f"🔄 UPDATE - PDF regenerated for {self.bill_number}")
+            
             # Recalculate subsequent bills if payment OR discount changed
             if old_total_paid != self.total_paid or old_discount != self.discount_amount:
                 self.recalculate_all_subsequent_bills()
+
+    def generate_pdf(self):
+        """Generate or regenerate PDF for this bill"""
+        try:
+            from .pdf_generator import generate_bill_pdf
+            
+            logger.info(f"🔄 Starting PDF generation for bill {self.bill_number}")
+            
+            # Generate PDF content
+            pdf_content = generate_bill_pdf(self)
+            
+            # Save PDF file
+            filename = f"bill_{self.bill_number}.pdf"
+            self.pdf_file.save(filename, ContentFile(pdf_content), save=False)
+            
+            # Update only the pdf_file field to avoid recursion
+            StudentBill.objects.filter(pk=self.pk).update(pdf_file=self.pdf_file)
+            
+            logger.info(f"✅ PDF generated successfully for bill {self.bill_number} - {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate PDF for bill {self.bill_number}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
     def generate_unique_bill_number(self):
         """Generate a unique bill number with better uniqueness handling"""
@@ -292,10 +354,7 @@ class StudentBill(models.Model):
         self.update_payment_status()
 
     def calculate_previous_arrears(self):
-        """
-        Calculate total unpaid balance from ALL previous bills across ALL classes/terms
-        🔥 CRITICAL FIX: Now includes discounts in the calculation
-        """
+        """Calculate total unpaid balance from ALL previous bills"""
         previous_bills = StudentBill.objects.filter(
             student=self.student,
             generated_date__lt=self.generated_date or timezone.now()
@@ -304,17 +363,13 @@ class StudentBill(models.Model):
         total_arrears = Decimal('0.00')
         
         for bill in previous_bills:
-            # Calculate balance considering discount
             bill_balance = bill.total_amount_due - bill.total_paid
             total_arrears += bill_balance
         
         self.previous_arrears = total_arrears
 
     def calculate_total_amount(self):
-        """
-        Calculate total amount for THIS bill only (excluding arrears)
-        This ensures the calculation uses the LATEST billing items from the template
-        """
+        """Calculate total amount for THIS bill only (excluding arrears)"""
         # Always get fresh billing items from database
         base_amount = sum(
             item.amount for item in self.billing_template.billing_items.all()
@@ -346,10 +401,7 @@ class StudentBill(models.Model):
             self.payment_status = 'overdue'
 
     def recalculate_all_subsequent_bills(self):
-        """
-        Recalculate ALL bills that come after this one chronologically
-        🔥 CRITICAL: This ensures discount changes cascade to future bills' arrears
-        """
+        """Recalculate ALL bills that come after this one chronologically"""
         subsequent_bills = StudentBill.objects.filter(
             student=self.student,
             generated_date__gt=self.generated_date
@@ -357,7 +409,7 @@ class StudentBill(models.Model):
         
         for bill in subsequent_bills:
             bill.recalculate_amounts()
-            bill.save(update_fields=['previous_arrears', 'total_amount_due', 'payment_status'])
+            bill.save(update_fields=['previous_arrears', 'total_amount_due', 'payment_status'], skip_pdf_generation=False)
 
     def create_change_logs(self, old_values):
         """Create logs for field changes"""
@@ -388,17 +440,20 @@ class StudentBill(models.Model):
 
     @property
     def balance_due(self):
-        """
-        Total balance student owes (previous arrears + current bill balance)
-        🔥 CRITICAL FIX: Discount is already applied in total_amount_due, 
-        so balance_due correctly reflects discounted total outstanding
-        """
+        """Total balance student owes (previous arrears + current bill balance)"""
         current_bill_balance = self.total_amount_due - self.total_paid
         return self.previous_arrears + current_bill_balance
 
     @property
     def is_overdue(self):
         return self.due_date < timezone.now().date() and self.payment_status != 'paid'
+    
+    @property
+    def pdf_url(self):
+        """Get PDF URL if available"""
+        if self.pdf_file:
+            return self.pdf_file.url
+        return None
 
 
 class CustomCharge(models.Model):
@@ -429,15 +484,18 @@ class CustomCharge(models.Model):
         return f"{self.charge_name} - GHS {self.amount}"
 
     def save(self, *args, **kwargs):
-        """Save custom charge and recalculate related bill"""
+        """Save custom charge and recalculate related bill + regenerate PDF"""
+        is_new = self.pk is None
         super().save(*args, **kwargs)
         
-        # Recalculate and save the bill
+        # Recalculate and save the bill (which will regenerate PDF)
         self.student_bill.recalculate_amounts()
-        self.student_bill.save(update_fields=['total_amount_due', 'payment_status'])
+        self.student_bill.save(update_fields=['total_amount_due', 'payment_status'], skip_pdf_generation=False)
         
         # Recalculate subsequent bills
         self.student_bill.recalculate_all_subsequent_bills()
+        
+        logger.info(f"{'📄 CUSTOM CHARGE ADDED' if is_new else '🔄 CUSTOM CHARGE UPDATED'} - '{self.charge_name}' - Bill {self.student_bill.bill_number} PDF regenerated")
 
 
 class PaymentReceipt(models.Model):
@@ -511,6 +569,8 @@ class PaymentReceipt(models.Model):
             )
         
         self.update_bill_total_paid_and_cascade()
+        
+        logger.info(f"{'📄 PAYMENT ADDED' if is_new else '🔄 PAYMENT UPDATED'} - Receipt {self.receipt_number} - Bill {self.student_bill.bill_number} PDF regenerated")
 
     def create_change_logs(self, old_values):
         """Create logs for payment receipt changes in StudentBillLog"""
@@ -538,7 +598,7 @@ class PaymentReceipt(models.Model):
                 )
 
     def update_bill_total_paid_and_cascade(self):
-        """Update the student bill's total_paid amount and trigger recalculation of all subsequent bills"""
+        """Update the student bill's total_paid amount and trigger recalculation (which regenerates PDF)"""
         total_paid = sum(
             receipt.amount_paid for receipt in self.student_bill.payment_receipts.all()
         )
@@ -546,7 +606,7 @@ class PaymentReceipt(models.Model):
         bill = self.student_bill
         bill.total_paid = total_paid
         bill.update_payment_status()
-        bill.save(update_fields=['total_paid', 'payment_status'])
+        bill.save(update_fields=['total_paid', 'payment_status'], skip_pdf_generation=False)
         
         bill.recalculate_all_subsequent_bills()
 
@@ -569,12 +629,15 @@ class StudentBillLog(models.Model):
         return f"{self.bill.bill_number} | {self.field_name} changed"
 
 
-# Signal handlers - FIXED VERSION WITH CREATION SUPPORT
+# ========================================
+# SIGNAL HANDLERS - PDF REGENERATION
+# ========================================
+
 @receiver(post_save, sender=BillingItem)
 def billing_item_saved(sender, instance, created, **kwargs):
     """
-    🔥 CRITICAL FIX: Recalculate student bills when billing items are created OR updated
-    This ensures current_bill_balance updates for ALL operations
+    CRITICAL: Recalculate and regenerate PDFs for ALL bills when billing items change
+    This ensures template changes cascade to all related bills
     """
     from django.db import transaction
     from itertools import groupby
@@ -584,17 +647,20 @@ def billing_item_saved(sender, instance, created, **kwargs):
             billing_template=instance.billing_template
         ).order_by('student_id', 'generated_date')
         
+        updated_count = 0
         for student_id, student_bills in groupby(bills_to_update, key=lambda x: x.student_id):
             for bill in student_bills:
                 bill.recalculate_amounts()
-                # Use save() with update_fields - this properly updates the instance
-                bill.save(update_fields=['total_amount_due', 'previous_arrears', 'payment_status'])
+                bill.save(update_fields=['total_amount_due', 'previous_arrears', 'payment_status'], skip_pdf_generation=False)
+                updated_count += 1
+        
+        logger.info(f"{'📄 BILLING ITEM CREATED' if created else '🔄 BILLING ITEM UPDATED'} - {updated_count} bills recalculated with PDF regeneration")
 
 
 @receiver(post_delete, sender=BillingItem)
 def billing_item_deleted(sender, instance, **kwargs):
     """
-    🔥 CRITICAL FIX: Recalculate student bills when billing items are deleted
+    CRITICAL: Recalculate and regenerate PDFs for ALL bills when billing items are deleted
     """
     from django.db import transaction
     from itertools import groupby
@@ -604,15 +670,21 @@ def billing_item_deleted(sender, instance, **kwargs):
             billing_template=instance.billing_template
         ).order_by('student_id', 'generated_date')
         
+        updated_count = 0
         for student_id, student_bills in groupby(bills_to_update, key=lambda x: x.student_id):
             for bill in student_bills:
                 bill.recalculate_amounts()
-                bill.save(update_fields=['total_amount_due', 'previous_arrears', 'payment_status'])
-                
+                bill.save(update_fields=['total_amount_due', 'previous_arrears', 'payment_status'], skip_pdf_generation=False)
+                updated_count += 1
+        
+        logger.info(f"🗑️ BILLING ITEM DELETED - {updated_count} bills recalculated with PDF regeneration")
+
 
 @receiver(post_delete, sender=CustomCharge)
 def custom_charge_deleted(sender, instance, **kwargs):
-    """Log deletion and recalculate bill total when custom charge is deleted"""
+    """
+    CRITICAL: Log deletion and recalculate bill + regenerate PDF when custom charge is deleted
+    """
     try:
         if hasattr(instance, 'student_bill') and instance.student_bill:
             user = getattr(instance, '_current_user', None)
@@ -631,20 +703,24 @@ def custom_charge_deleted(sender, instance, **kwargs):
                 user_email=user.email
             )
             
-            # Recalculate and save bill
+            # Recalculate and save bill (PDF regenerated automatically)
             bill = instance.student_bill
             bill.recalculate_amounts()
-            bill.save(update_fields=['total_amount_due', 'payment_status'])
+            bill.save(update_fields=['total_amount_due', 'payment_status'], skip_pdf_generation=False)
             
             # Recalculate subsequent bills
             bill.recalculate_all_subsequent_bills()
-    except Exception:
-        pass
+            
+            logger.info(f"🗑️ CUSTOM CHARGE DELETED - '{instance.charge_name}' - Bill {bill.bill_number} PDF regenerated")
+    except Exception as e:
+        logger.error(f"Error in custom_charge_deleted signal: {e}")
 
 
 @receiver(post_delete, sender=PaymentReceipt)
 def payment_receipt_deleted(sender, instance, **kwargs):
-    """Update bill total_paid and log deletion when payment receipt is deleted"""
+    """
+    CRITICAL: Update bill total_paid, log deletion, and regenerate PDF when payment receipt is deleted
+    """
     try:
         if hasattr(instance, 'student_bill') and instance.student_bill:
             user = getattr(instance, '_current_user', None)
@@ -670,8 +746,40 @@ def payment_receipt_deleted(sender, instance, **kwargs):
             bill = instance.student_bill
             bill.total_paid = total_paid
             bill.update_payment_status()
-            bill.save(update_fields=['total_paid', 'payment_status'])
+            bill.save(update_fields=['total_paid', 'payment_status'], skip_pdf_generation=False)
             
             bill.recalculate_all_subsequent_bills()
-    except Exception:
-        pass
+            
+            logger.info(f"🗑️ PAYMENT DELETED - Receipt {instance.receipt_number} - Bill {bill.bill_number} PDF regenerated")
+    except Exception as e:
+        logger.error(f"Error in payment_receipt_deleted signal: {e}")
+
+
+@receiver(post_save, sender=BillingTemplate)
+def billing_template_saved(sender, instance, created, **kwargs):
+    """
+    CRITICAL: Regenerate PDFs for ALL bills when template due_date changes
+    This ensures due date changes are reflected in all PDFs
+    """
+    if not created:
+        from django.db import transaction
+        from itertools import groupby
+        
+        with transaction.atomic():
+            bills_to_update = StudentBill.objects.select_for_update().filter(
+                billing_template=instance
+            ).order_by('student_id', 'generated_date')
+            
+            updated_count = 0
+            for student_id, student_bills in groupby(bills_to_update, key=lambda x: x.student_id):
+                for bill in student_bills:
+                    # Update due date if it changed
+                    if bill.due_date != instance.due_date:
+                        bill.due_date = instance.due_date
+                        bill.save(update_fields=['due_date'], skip_pdf_generation=False)
+                    else:
+                        # Just regenerate PDF for template info changes
+                        bill.generate_pdf()
+                    updated_count += 1
+            
+            logger.info(f"🔄 BILLING TEMPLATE UPDATED - {updated_count} bills PDFs regenerated")
