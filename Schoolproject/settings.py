@@ -70,6 +70,7 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     '13.60.29.130', 
     'plvcmonline.uk', 
+    'backend-django-5-clix.onrender.com', 
     'api.plvcmonline.uk'
 ]
 
@@ -77,7 +78,7 @@ ALLOWED_HOSTS = [
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:4200',  # Localhost for frontend during dev
     'http://localhost:5173',
-    'https://plvcmonline.uk',  # Another frontend URL
+     # Another frontend URL
     'http://13.60.29.130:8000',  # Add the public IP of the backend here
 ]
 
