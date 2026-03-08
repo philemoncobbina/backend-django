@@ -110,6 +110,7 @@ INSTALLED_APPS = [
     'django.contrib.sites',  # Make sure this is included
     'allauth',
     'allauth.account',
+    'blogs',
     'oauth2_provider',
     'social_django',
     'rest_framework_social_oauth2',
@@ -159,8 +160,10 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'authapp.ratelimit_middleware.RateLimitMiddleware',
     'allauth.account.middleware.AccountMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    'django.middleware.security.SecurityMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -277,7 +280,7 @@ SOCIALACCOUNT_PROVIDERS = {
 
 # Optionally configure email verification if needed
 ACCOUNT_EMAIL_VERIFICATION = "mandatory"  # Or "optional"
-ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'username*', 'password1*', 'password2*']
 
 
 # Session expires after 7 hours (25200 seconds)
@@ -322,6 +325,14 @@ LOGGING = {
 # Media files configuration for PDF storage
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+STORAGES = {
+    # ...
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Report card settings
 # Report card settings
