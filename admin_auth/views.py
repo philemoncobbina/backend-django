@@ -4,7 +4,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth import get_user_model
-from rest_framework_jwt.settings import api_settings
 from django.contrib.auth import authenticate, login
 from django.core.mail import send_mail
 from django.urls import reverse
