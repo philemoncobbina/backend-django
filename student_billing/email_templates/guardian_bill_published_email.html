@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+
+<body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+        <div style="text-align: center; background-color: #4CAF50; padding: 15px; border-radius: 10px 10px 0 0;">
+            <h2 style="color: white; margin: 0;">School Fee Bill Published</h2>
+        </div>
+
+        <div style="padding: 20px;">
+            <p>Dear {{ guardian_first_name }} {{ guardian_last_name }},</p>
+
+            <p>We wish to inform you that a school fee bill has been published for your ward,
+                <strong>{{ student_first_name }} {{ student_last_name }}</strong>, for
+                <strong>{{ class_name }} - {{ term_display }} Term ({{ academic_year }})</strong>.
+                The bill is now available for payment.
+            </p>
+
+            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="color: #4CAF50; margin-top: 0;">Bill Details:</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Student Name:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ student_first_name }}
+                            {{ student_last_name }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Bill Number:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ bill_number }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Class:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ class_name }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Term:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ term_display }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Academic Year:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ academic_year }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Total Amount Due:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">GHS {{ total_amount_due }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Previous Arrears:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">GHS {{ previous_arrears }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Total Balance Due:</strong>
+                        </td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold; color: #e74c3c;">GHS
+                            {{ balance_due }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Due Date:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ due_date }}</td>
+                    </tr>
+                </table>
+            </div>
+
+            <p>Kindly ensure the fees are settled before the due date to avoid any inconvenience.
+                Your ward can log in to the student portal to view the complete bill details.</p>
+
+            <div style="text-align: center; margin: 25px 0;">
+                <a href="{{ portal_url }}" style="display: inline-block; padding: 12px 25px; background-color: #4CAF50; color: white;
+                          text-decoration: none; border-radius: 5px; font-weight: bold;">
+                    View Bill on Portal
+                </a>
+            </div>
+
+            <p><strong>Payment Methods Available:</strong></p>
+            <ul>
+                <li>Cash</li>
+                <li>Bank Transfer</li>
+                <li>Mobile Money</li>
+                <li>Cheque</li>
+            </ul>
+
+            <p>If you have any questions or concerns regarding this bill, please do not hesitate to contact the school
+                administration.</p>
+
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">
+                <p style="margin: 0; color: #666;">Best regards,<br>
+                    <strong>School Administration</strong><br>
+                    Finance Department
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,11 @@
+Dear {{ guardian_first_name }},
+
+A new school fee bill has been published for {{ student_first_name }} {{ student_last_name }} ({{ class_name }}).
+
+Bill No: {{ bill_number }}
+Term: {{ term_display }} | {{ academic_year }}
+Total Due: GHS {{ total_amount_due }}
+Balance Due: GHS {{ balance_due }}
+Due Date: {{ due_date }}
+
+Log in to the portal to view full details.

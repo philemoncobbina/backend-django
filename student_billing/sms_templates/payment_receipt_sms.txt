@@ -1,0 +1,12 @@
+Dear {{ guardian_first_name }},
+
+A payment has been received for {{ student_first_name }} {{ student_last_name }}.
+
+Receipt No: {{ receipt_number }}
+Amount Paid: GHS {{ amount_paid }}
+Method: {{ payment_method_display }}
+Date: {{ payment_date }}
+Bill No: {{ bill_number }}
+Remaining Balance: GHS {{ balance_due }}
+
+Thank you for your payment.

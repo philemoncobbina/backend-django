@@ -4,14 +4,16 @@ from .views import (
     CourseViewSet,
     ClassCourseViewSet,
     ResultViewSet,
-    StudentResultsViewSet,  # Changed from StudentResultsView
+    StudentResultsViewSet,
+    StudentCoursesViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'courses', CourseViewSet)
 router.register(r'class-courses', ClassCourseViewSet)
 router.register(r'results', ResultViewSet)
-router.register(r'my-results', StudentResultsViewSet, basename='my-results')  # Register as ViewSet
+router.register(r'my-results', StudentResultsViewSet, basename='my-results')
+router.register(r'my-courses', StudentCoursesViewSet, basename='my-courses')
 
 urlpatterns = [
     path('', include(router.urls)),

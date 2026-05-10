@@ -1,3 +1,4 @@
+# admin_auth/views.py
 from rest_framework import generics, permissions, status
 import requests
 from rest_framework.response import Response
@@ -91,15 +92,88 @@ class SessionCheckView(APIView):
                 'role': user.role,
             }
         })
-        # Tell the browser/CDN: cache this response for 5 minutes privately.
-        # "private" means only the end-user's browser caches it, not shared proxies.
-        # This alone cuts repeat calls within a 5-minute window to zero.
         response['Cache-Control'] = 'private, max-age=300'
         return response
 
 
 class AdminUserManagementView(APIView):
     permission_classes = [IsPrincipalOrSuperuser]
+
+    # ── Guardian e-mail conflict check ────────────────────────────────────
+
+    @staticmethod
+    def _validate_guardian_emails(student_email, guardians_data):
+        """
+        Return a Response(400) if any guardian in *guardians_data* carries the
+        same e-mail as the student, otherwise return None.
+
+        This is an explicit early-exit guard that runs *before* the serializer
+        so the caller gets a clear, human-readable error message rather than a
+        cryptic model-level ValidationError.
+
+        Parameters
+        ----------
+        student_email : str | None
+            The e-mail that will be recorded for the student after the update.
+        guardians_data : list[dict] | None
+            The raw guardian dicts from the request payload, or None when the
+            key was omitted entirely (PATCH without guardians).
+        """
+        if not student_email or not guardians_data:
+            return None
+
+        conflicting = [
+            gd.get('email', '')
+            for gd in guardians_data
+            if gd.get('email', '').strip().lower() == student_email.strip().lower()
+        ]
+
+        if conflicting:
+            return Response(
+                {
+                    'error': (
+                        "A guardian's email cannot be the same as the student's "
+                        f"email ({student_email}). Please use a different email "
+                        "address for the guardian."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return None
+
+    @staticmethod
+    def _validate_student_email_vs_existing_guardians(user, new_email):
+        """
+        Return a Response(400) if changing the student's e-mail to *new_email*
+        would create a conflict with any guardian already saved on that user,
+        otherwise return None.
+
+        This prevents a subtle edge-case: an admin changes the student's e-mail
+        to a value that is already stored as a guardian's e-mail without touching
+        the guardians list at all.
+        """
+        conflicting = list(
+            user.guardians
+            .filter(email__iexact=new_email.strip())
+            .values_list('email', flat=True)
+        )
+
+        if conflicting:
+            return Response(
+                {
+                    'error': (
+                        f"The new student email ({new_email}) conflicts with an "
+                        "existing guardian email on this account. Update or remove "
+                        "the guardian's email first."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return None
+
+    # ── HTTP verbs ─────────────────────────────────────────────────────────
 
     def get(self, request, *args, **kwargs):
         """GET — accessible by staff (read-only), principals, and superusers."""
@@ -110,7 +184,10 @@ class AdminUserManagementView(APIView):
     def patch(self, request, user_id, *args, **kwargs):
         """PATCH — only principals and superusers."""
         if not (request.user.is_superuser or request.user.role == 'principal'):
-            logger.warning(f"Unauthorized PATCH attempt by user {request.user.email} with role {request.user.role}")
+            logger.warning(
+                f"Unauthorized PATCH attempt by user {request.user.email} "
+                f"with role {request.user.role}"
+            )
             return Response(
                 {'error': 'Permission denied. Only principals can modify users.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -124,36 +201,94 @@ class AdminUserManagementView(APIView):
             return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.data.get('action')
-        logger.debug(f"Processing action: {action} for user {user.email} by {request.user.email}")
+        logger.debug(
+            f"Processing action: {action} for user {user.email} by {request.user.email}"
+        )
 
         if action == 'block':
             user.is_blocked = True
             user.is_active = False
             user.save()
             logger.info(f"User {user.email} blocked successfully by {request.user.email}")
-            return Response({'message': f'User {user.email} has been blocked.'}, status=status.HTTP_200_OK)
+            return Response(
+                {'message': f'User {user.email} has been blocked.'},
+                status=status.HTTP_200_OK
+            )
 
         elif action == 'unblock':
             user.is_blocked = False
             user.is_active = True
             user.save()
             logger.info(f"User {user.email} unblocked successfully by {request.user.email}")
-            return Response({'message': f'User {user.email} has been unblocked.'}, status=status.HTTP_200_OK)
+            return Response(
+                {'message': f'User {user.email} has been unblocked.'},
+                status=status.HTTP_200_OK
+            )
 
         elif action == 'edit':
             old_class = user.class_name
             new_class = request.data.get('class_name')
 
-            serializer = AdminUserSerializer(user, data=request.data, partial=True)
+            # ── Guardian e-mail validation (view-level guard) ──────────────
+            #
+            # Resolve the student e-mail that will be in effect after the save:
+            #   • Use the incoming value when the payload includes 'email'.
+            #   • Fall back to the current persisted value otherwise.
+            incoming_student_email = request.data.get('email') or user.email
+            guardians_data = request.data.get('guardians')  # may be None or a list
+
+            # 1. New/updated guardian list vs student e-mail.
+            conflict_response = self._validate_guardian_emails(
+                incoming_student_email, guardians_data
+            )
+            if conflict_response:
+                logger.warning(
+                    f"Guardian e-mail conflict detected for student {user.email} "
+                    f"by {request.user.email}"
+                )
+                return conflict_response
+
+            # 2. Changing the student's e-mail vs already-saved guardian e-mails.
+            if 'email' in request.data and request.data['email'] != user.email:
+                conflict_response = self._validate_student_email_vs_existing_guardians(
+                    user, incoming_student_email
+                )
+                if conflict_response:
+                    logger.warning(
+                        f"New student email {incoming_student_email} conflicts with "
+                        f"an existing guardian email for user {user.email} "
+                        f"(requested by {request.user.email})"
+                    )
+                    return conflict_response
+
+            # ── Build a clean mutable copy of the request payload ──────────
+            # QueryDict.copy() gives us a mutable version; if the client sends
+            # JSON (the common case with DRF), request.data is already a plain
+            # dict so we just use it directly.
+            if hasattr(request.data, 'copy'):
+                mutable_data = request.data.copy()
+            else:
+                mutable_data = dict(request.data)
+
+            serializer = AdminUserSerializer(user, data=mutable_data, partial=True)
+
             if serializer.is_valid():
                 serializer.save()
 
                 if new_class and new_class != old_class and user.is_student:
-                    logger.info(f"Detected class change for student {user.email}: {old_class} -> {new_class}")
+                    logger.info(
+                        f"Detected class change for student {user.email}: "
+                        f"{old_class} -> {new_class}"
+                    )
                     self._handle_class_change(user, old_class, new_class)
 
-                logger.info(f"User {user.email} details updated successfully by {request.user.email}")
-                return Response({'message': 'User details updated successfully.'}, status=status.HTTP_200_OK)
+                logger.info(
+                    f"User {user.email} details updated successfully by {request.user.email}"
+                )
+                return Response(
+                    {'message': 'User details updated successfully.'},
+                    status=status.HTTP_200_OK
+                )
 
             logger.error(f"Validation errors for user {user.email}: {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -161,11 +296,18 @@ class AdminUserManagementView(APIView):
         elif action == 'activate':
             user.is_active = True
             user.save()
-            logger.info(f"User {user.email} activated successfully by {request.user.email}")
-            return Response({'message': f'User {user.email} has been activated.'}, status=status.HTTP_200_OK)
+            logger.info(
+                f"User {user.email} activated successfully by {request.user.email}"
+            )
+            return Response(
+                {'message': f'User {user.email} has been activated.'},
+                status=status.HTTP_200_OK
+            )
 
         logger.warning(f"Unknown action received: {action} by {request.user.email}")
         return Response({'error': 'Invalid action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # ── Helpers ───────────────────────────────────────────────────────────
 
     def _handle_class_change(self, user, old_class, new_class):
         """Handle the class change for a student and save ALL historical changes."""
@@ -175,7 +317,9 @@ class AdminUserManagementView(APIView):
             logger.debug(f"Current academic year: {current_year}")
 
             if old_class != new_class:
-                logger.info(f"Recording class change for {user.email}: {old_class} → {new_class}")
+                logger.info(
+                    f"Recording class change for {user.email}: {old_class} → {new_class}"
+                )
                 StudentClassHistory.objects.create(
                     student=user,
                     academic_year=current_year,
@@ -205,7 +349,10 @@ class AdminUserManagementView(APIView):
     def delete(self, request, user_id, *args, **kwargs):
         """DELETE — only principals and superusers."""
         if not (request.user.is_superuser or request.user.role == 'principal'):
-            logger.warning(f"Unauthorized DELETE attempt by user {request.user.email} with role {request.user.role}")
+            logger.warning(
+                f"Unauthorized DELETE attempt by user {request.user.email} "
+                f"with role {request.user.role}"
+            )
             return Response(
                 {'error': 'Permission denied. Only principals can delete users.'},
                 status=status.HTTP_403_FORBIDDEN
@@ -221,7 +368,10 @@ class AdminUserManagementView(APIView):
         email = user.email
         user.delete()
         logger.info(f"User {email} deleted successfully by {request.user.email}")
-        return Response({'message': f'User {email} has been deleted successfully.'}, status=status.HTTP_200_OK)
+        return Response(
+            {'message': f'User {email} has been deleted successfully.'},
+            status=status.HTTP_200_OK
+        )
 
 
 class AdminSignUpView(generics.CreateAPIView):
@@ -229,22 +379,30 @@ class AdminSignUpView(generics.CreateAPIView):
     serializer_class = AdminUserSerializer
 
     def create(self, request, *args, **kwargs):
-        # Rate limit: 10 per hour per IP
         if getattr(request, 'limited', False):
             return _rate_limited_response()
 
         if not (request.user.is_superuser or request.user.role == 'principal'):
-            return Response({'error': 'Only principals or superusers can create users.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {'error': 'Only principals or superusers can create users.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         mutable_data = request.data.copy()
         email = mutable_data.get('email')
         role = mutable_data.get('role', 'staff')
 
         if role not in ['staff', 'principal']:
-            return Response({'error': 'Invalid role provided.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Invalid role provided.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if CustomUser.objects.filter(email=email).exists():
-            return Response({'error': 'Email has already been used.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Email has already been used.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         serializer = self.get_serializer(data=mutable_data)
         serializer.is_valid(raise_exception=True)
@@ -253,7 +411,10 @@ class AdminSignUpView(generics.CreateAPIView):
         try:
             user = CustomUser.objects.get(email=email)
         except ObjectDoesNotExist:
-            return Response({'error': 'User creation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {'error': 'User creation failed.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
         self.send_verification_email(user)
 
@@ -267,8 +428,9 @@ class AdminSignUpView(generics.CreateAPIView):
     def send_verification_email(self, user):
         verification_token = RefreshToken.for_user(user).access_token
 
-        # IDOR FIX: user_id removed from URL — identity comes from inside the token only
-        verification_url = reverse('admin_auth:verify-email', kwargs={'token': str(verification_token)})
+        verification_url = reverse(
+            'admin_auth:verify-email', kwargs={'token': str(verification_token)}
+        )
         verification_url = self.request.build_absolute_uri(verification_url)
 
         email_body = f"""
@@ -278,7 +440,9 @@ class AdminSignUpView(generics.CreateAPIView):
             <h2 style="color: #4CAF50;">Welcome to Our Service!</h2>
             <p>Thank you for registering with us. Please click the button below to verify your email address:</p>
 
-            <a href="{verification_url}" style="display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: #fff; text-decoration: none; border-radius: 5px; font-weight: bold;">
+            <a href="{verification_url}" style="display: inline-block; padding: 10px 20px;
+               background-color: #4CAF50; color: #fff; text-decoration: none;
+               border-radius: 5px; font-weight: bold;">
                 Verify Your Email
             </a>
 
@@ -311,14 +475,7 @@ class AdminSignUpView(generics.CreateAPIView):
 
 class VerifyEmailView(APIView):
     """
-    IDOR FIX
-    --------
-    The original endpoint accepted `user_id` directly from the URL, which allowed
-    an attacker to tamper with it and activate arbitrary accounts.
-
-    Fix: `user_id` is removed from the URL entirely. The JWT token already contains
-    the authoritative `user_id` in its payload. We decode the token first and look
-    up the user from that — the URL carries only the token, nothing else.
+    IDOR FIX: user_id removed from URL — identity comes from inside the token only.
 
     URL change required in urls.py:
         OLD: path('verify-email/<int:user_id>/<str:token>/', ...)
@@ -326,7 +483,6 @@ class VerifyEmailView(APIView):
     """
 
     def get(self, request, token):
-        # Rate limit: 10 per hour per IP (checked via middleware)
         if getattr(request, 'limited', False):
             return Response(
                 {'error': 'Too many requests. Please try again later.'},
@@ -334,14 +490,15 @@ class VerifyEmailView(APIView):
             )
 
         try:
-            # Decode token — this is the ONLY source of truth for user identity
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             user_id_from_token = payload.get('user_id')
 
             if not user_id_from_token:
-                return Response({'error': 'Invalid token.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {'error': 'Invalid token.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-            # Look up user purely from the token payload — no URL parameter involved
             user = get_object_or_404(User, id=user_id_from_token)
 
             if user.is_active:
@@ -354,16 +511,21 @@ class VerifyEmailView(APIView):
 
         except jwt.ExpiredSignatureError:
             logger.error("Activation link has expired.")
-            return Response({'error': 'Activation link has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Activation link has expired.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         except jwt.InvalidTokenError:
             logger.error("Invalid activation link.")
-            return Response({'error': 'Invalid activation link.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Invalid activation link.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class LoginView(APIView):
     def post(self, request):
-        # Rate limit: 5 per minute per IP (checked via middleware)
         if getattr(request, 'limited', False):
             return _rate_limited_response()
 
@@ -373,16 +535,28 @@ class LoginView(APIView):
         try:
             user = CustomUser.objects.get(email=email)
         except CustomUser.DoesNotExist:
-            return Response({'error': 'Incorrect username or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {'error': 'Incorrect username or password.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
         if user.role.lower() not in ['principal', 'staff']:
-            return Response({'error': 'You are not authorized to access the admin system.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {'error': 'You are not authorized to access the admin system.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         if user.is_blocked:
-            return Response({'error': 'Your account has been blocked. Please contact support for assistance.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {'error': 'Your account has been blocked. Please contact support for assistance.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         if not user.is_active:
-            return Response({'error': 'Account not verified. Please check your email for the verification link.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {'error': 'Account not verified. Please check your email for the verification link.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
         if check_password(password, user.password):
             login(request, user)
@@ -397,7 +571,10 @@ class LoginView(APIView):
                 }
             })
         else:
-            return Response({'error': 'Incorrect username or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {'error': 'Incorrect username or password.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
 
 class LogoutView(APIView):

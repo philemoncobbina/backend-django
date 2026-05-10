@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+
+<body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+        <div style="text-align: center; background-color: #2196F3; padding: 15px; border-radius: 10px 10px 0 0;">
+            <h2 style="color: white; margin: 0;">Payment Receipt</h2>
+        </div>
+
+        <div style="padding: 20px;">
+            <p>Dear {{ student_first_name }} {{ student_last_name }},</p>
+
+            <p>Thank you for your payment. Here are your payment details:</p>
+
+            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="color: #2196F3; margin-top: 0;">Payment Details:</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Receipt Number:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ receipt_number }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Amount Paid:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold; color: #27ae60;">GHS
+                            {{ amount_paid }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Payment Method:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ payment_method_display }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Payment Date:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ payment_date }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>Applied to Bill:</strong></td>
+                        <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ bill_number }}</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div style="background-color: #e8f5e8; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="color: #27ae60; margin-top: 0;">Current Balance:</h3>
+                <p style="font-size: 18px; font-weight: bold; text-align: center; color: #e74c3c;">
+                    GHS {{ balance_due }}
+                </p>
+            </div>
+
+            <p>You can view your updated bill and payment history by logging into your student portal.</p>
+
+            <div style="text-align: center; margin: 25px 0;">
+                <a href="{{ portal_url }}" style="display: inline-block; padding: 12px 25px; background-color: #2196F3; color: white;
+                          text-decoration: none; border-radius: 5px; font-weight: bold;">
+                    View Your Bills
+                </a>
+            </div>
+
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">
+                <p style="margin: 0; color: #666;">Best regards,<br>
+                    <strong>School Administration</strong><br>
+                    Finance Department
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
