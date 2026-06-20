@@ -31,4 +31,10 @@ urlpatterns = [
     path('my-bills/', views.StudentMyBillsView.as_view(), name='student-my-bills'),
     path('my-bills/current-class/', views.StudentCurrentClassBillsView.as_view(), name='student-current-class-bills'),
     path('my-bills/previous-classes/', views.StudentPreviousClassBillsView.as_view(), name='student-previous-class-bills'),
+
+    # Payment Receipt Requests
+    path('receipt-requests/', views.PaymentReceiptRequestListCreateView.as_view(), name='payment-receipt-request-list-create'),
+    path('receipt-requests/<int:pk>/', views.PaymentReceiptRequestDetailView.as_view(), name='payment-receipt-request-detail'),
+    path('receipt-requests/<int:pk>/review/', views.PaymentReceiptRequestReviewView.as_view(), name='payment-receipt-request-review'),
+    path('receipt-requests/<int:request_id>/logs/', views.PaymentReceiptRequestLogListView.as_view(), name='payment-receipt-request-logs'),
 ]

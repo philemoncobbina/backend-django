@@ -41,6 +41,19 @@ from .utils.pdf_generator import generate_report_card_pdf
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _student_full_name(student):
+    """Safe helper — works whether or not CustomUser defines get_full_name()."""
+    return f"{student.first_name} {student.last_name}".strip() or student.get_username()
+
+
+# ---------------------------------------------------------------------------
+# Filters
+# ---------------------------------------------------------------------------
+
 class ResultFilter(FilterSet):
     student = CharFilter(field_name='student')
     class_name = CharFilter(field_name='class_name')
@@ -51,6 +64,10 @@ class ResultFilter(FilterSet):
         model = Result
         fields = ['student', 'class_name', 'term', 'status']
 
+
+# ---------------------------------------------------------------------------
+# CourseViewSet
+# ---------------------------------------------------------------------------
 
 class CourseViewSet(viewsets.ModelViewSet):
     queryset = Course.objects.all()
@@ -64,6 +81,10 @@ class CourseViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+
+# ---------------------------------------------------------------------------
+# ClassCourseViewSet
+# ---------------------------------------------------------------------------
 
 class ClassCourseViewSet(viewsets.ModelViewSet):
     queryset = ClassCourse.objects.all()
@@ -115,63 +136,26 @@ class ClassCourseViewSet(viewsets.ModelViewSet):
 
 # ---------------------------------------------------------------------------
 # StudentCoursesViewSet
-# Provides two read-only endpoints so that a student can see all courses
-# assigned to their current class/term as well as courses from any previous
-# class/term — independently of whether results have been published yet.
 # ---------------------------------------------------------------------------
+
 class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Read-only viewset that exposes course assignments to authenticated students.
-
-    Endpoints
-    ---------
-    GET  /my-courses/                        → current class & term courses
-    GET  /my-courses/previous/               → courses for a past class/term
-                                               (?class_name=&term= required)
-    GET  /my-courses/by_class_and_term/      → staff/principal helper: fetch
-                                               courses for any class+term
-                                               (?class_name=&term= required)
-
-    Access rules
-    ------------
-    - Any authenticated user may call these endpoints.
-    - Students see courses for their own class(es) only.
-    - Staff and principals may use `by_class_and_term` to inspect any class.
-    """
-
     serializer_class = StudentCourseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    # We override get_queryset per-action, so the base queryset is the full set.
     def get_queryset(self):
         return ClassCourse.objects.select_related('course').all()
 
-    # ------------------------------------------------------------------
-    # list  →  GET /my-courses/
-    # Returns ALL courses for the requesting student's current class and
-    # every term (first, second, third).  An optional ?term= query param
-    # narrows it down to a single term.
-    # ------------------------------------------------------------------
     def list(self, request, *args, **kwargs):
         user = request.user
 
-        # Resolve the class to display
-        # Staff/principals must supply ?class_name= (otherwise we have
-        # nothing sensible to fall back to).
         if user.role in ['staff', 'principal']:
             class_name = request.query_params.get('class_name')
             if not class_name:
                 return Response(
-                    {
-                        "error": (
-                            "Staff and principal users must supply a "
-                            "?class_name= query parameter."
-                        )
-                    },
+                    {"error": "Staff and principal users must supply a ?class_name= query parameter."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         else:
-            # Regular student — use their own current class.
             class_name = getattr(user, 'class_name', None)
             if not class_name:
                 return Response(
@@ -180,10 +164,7 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
                 )
 
         term = request.query_params.get('term')
-
-        queryset = ClassCourse.objects.select_related('course').filter(
-            class_name=class_name
-        )
+        queryset = ClassCourse.objects.select_related('course').filter(class_name=class_name)
         if term:
             queryset = queryset.filter(term=term)
 
@@ -192,8 +173,7 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
                 {
                     "message": (
                         f"No courses found for class '{class_name}'"
-                        + (f" in term '{term}'" if term else "")
-                        + "."
+                        + (f" in term '{term}'" if term else "") + "."
                     ),
                     "class_name": class_name,
                     "term": term,
@@ -203,47 +183,22 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         serializer = self.get_serializer(queryset, many=True)
-        return Response(
-            {
-                "class_name": class_name,
-                "term": term or "all",
-                "total_courses": queryset.count(),
-                "courses": serializer.data,
-            }
-        )
+        return Response({
+            "class_name": class_name,
+            "term": term or "all",
+            "total_courses": queryset.count(),
+            "courses": serializer.data,
+        })
 
-    # ------------------------------------------------------------------
-    # retrieve is not meaningful here (there is no single "my course"
-    # record), so we disable it gracefully.
-    # ------------------------------------------------------------------
     def retrieve(self, request, *args, **kwargs):
         return Response(
-            {
-                "detail": (
-                    "Direct lookup by ID is not supported on this endpoint. "
-                    "Use the list endpoint with optional ?term= filtering, "
-                    "or /my-courses/previous/ for historical courses."
-                )
-            },
+            {"detail": "Direct lookup by ID is not supported on this endpoint."},
             status=status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
-    # ------------------------------------------------------------------
-    # GET /my-courses/previous/
-    # Returns courses for a student's previous class and term.
-    # Requires ?class_name= and ?term= query parameters.
-    #
-    # For students: the requested class_name must differ from their
-    # current class to prevent confusion (current class is served by
-    # the list endpoint).  We also check class_history if available so
-    # that a student cannot peek at classes they were never enrolled in.
-    #
-    # Staff/principals can query any class_name + term freely.
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'], url_path='previous')
     def previous(self, request):
         user = request.user
-
         class_name = request.query_params.get('class_name')
         term = request.query_params.get('term')
 
@@ -253,48 +208,25 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # --- Student-specific validation -----------------------------------
         if user.role not in ['staff', 'principal']:
             current_class = getattr(user, 'class_name', None)
-
-            # Warn (but do not block) if the student asks for their current class.
-            # They should use the list endpoint for that, but we still serve the
-            # data rather than returning an opaque error.
             if class_name == current_class:
                 logger.info(
-                    f"Student {user.id} requested previous/ for their current class "
-                    f"({class_name}).  Serving data anyway."
+                    f"Student {user.id} requested previous/ for their current class ({class_name}). Serving anyway."
                 )
-
-            # If the model exposes class_history, verify the student was in
-            # that class.  If there is no class_history, skip the check.
             if hasattr(user, 'class_history'):
-                was_enrolled = user.class_history.filter(
-                    class_name=class_name
-                ).exists()
-                if not was_enrolled:
+                if not user.class_history.filter(class_name=class_name).exists():
                     return Response(
-                        {
-                            "detail": (
-                                f"You have no enrolment history in class '{class_name}'."
-                            )
-                        },
+                        {"detail": f"You have no enrolment history in class '{class_name}'."},
                         status=status.HTTP_403_FORBIDDEN,
                     )
 
-        # --- Fetch courses --------------------------------------------------
-        queryset = ClassCourse.objects.select_related('course').filter(
-            class_name=class_name,
-            term=term,
-        )
+        queryset = ClassCourse.objects.select_related('course').filter(class_name=class_name, term=term)
 
         if not queryset.exists():
             return Response(
                 {
-                    "message": (
-                        f"No courses found for class '{class_name}' "
-                        f"in term '{term}'."
-                    ),
+                    "message": f"No courses found for class '{class_name}' in term '{term}'.",
                     "class_name": class_name,
                     "term": term,
                     "courses": [],
@@ -303,21 +235,13 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         serializer = self.get_serializer(queryset, many=True)
-        return Response(
-            {
-                "class_name": class_name,
-                "term": term,
-                "total_courses": queryset.count(),
-                "courses": serializer.data,
-            }
-        )
+        return Response({
+            "class_name": class_name,
+            "term": term,
+            "total_courses": queryset.count(),
+            "courses": serializer.data,
+        })
 
-    # ------------------------------------------------------------------
-    # GET /my-courses/by_class_and_term/
-    # Convenience action for staff and principals to query any
-    # class + term combination directly.  Students may also use it
-    # but are restricted to their own current class.
-    # ------------------------------------------------------------------
     @action(detail=False, methods=['get'], url_path='by_class_and_term')
     def by_class_and_term(self, request):
         class_name = request.query_params.get('class_name')
@@ -330,34 +254,20 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         user = request.user
-
-        # Students can only view their own class via this action.
         if user.role not in ['staff', 'principal']:
             current_class = getattr(user, 'class_name', None)
             if class_name != current_class:
                 return Response(
-                    {
-                        "detail": (
-                            "You are not permitted to view course assignments "
-                            "for other classes.  Use the list endpoint for your "
-                            "current class or /previous/ for past classes."
-                        )
-                    },
+                    {"detail": "You are not permitted to view course assignments for other classes."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        queryset = ClassCourse.objects.select_related('course').filter(
-            class_name=class_name,
-            term=term,
-        )
+        queryset = ClassCourse.objects.select_related('course').filter(class_name=class_name, term=term)
 
         if not queryset.exists():
             return Response(
                 {
-                    "message": (
-                        f"No courses found for class '{class_name}' "
-                        f"in term '{term}'."
-                    ),
+                    "message": f"No courses found for class '{class_name}' in term '{term}'.",
                     "class_name": class_name,
                     "term": term,
                     "courses": [],
@@ -366,21 +276,19 @@ class StudentCoursesViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         serializer = self.get_serializer(queryset, many=True)
-        return Response(
-            {
-                "class_name": class_name,
-                "term": term,
-                "total_courses": queryset.count(),
-                "courses": serializer.data,
-            }
-        )
+        return Response({
+            "class_name": class_name,
+            "term": term,
+            "total_courses": queryset.count(),
+            "courses": serializer.data,
+        })
 
 
-logger = logging.getLogger(__name__)
-
+# ---------------------------------------------------------------------------
+# ResultViewSet
+# ---------------------------------------------------------------------------
 
 class ResultViewSet(viewsets.ModelViewSet):
-    # Base queryset without prefetch - we'll add it in get_queryset
     queryset = Result.objects.select_related('student')
     serializer_class = ResultSerializer
     permission_classes = [PublishedResultsOnlyPrincipal]
@@ -403,7 +311,6 @@ class ResultViewSet(viewsets.ModelViewSet):
         return [PublishedResultsOnlyPrincipal()]
 
     def get_queryset(self):
-        """Optimize queryset with proper prefetching"""
         return Result.objects.select_related('student').prefetch_related(
             Prefetch(
                 'course_results',
@@ -420,6 +327,8 @@ class ResultViewSet(viewsets.ModelViewSet):
         return super().retrieve(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
+        from .tasks import generate_pdf_for_result, recalculate_positions_and_regenerate_pdfs
+
         self._validate_create_request(request.data)
 
         serializer = self.get_serializer(data=request.data)
@@ -427,12 +336,29 @@ class ResultViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             instance = serializer.save()
-            self._handle_post_create_tasks(instance)
+
+        # Offload position recalculation + PDF fan-out to Celery
+        recalculate_positions_and_regenerate_pdfs.delay(
+            instance.class_name,
+            instance.term,
+            instance.academic_year,
+        )
+
+        # Send email synchronously (fast) if published
+        if instance.status == 'PUBLISHED':
+            EmailNotifier.send_result_published(instance)
+
+        logger.info(
+            f"[ResultViewSet.create] Result {instance.id} created — "
+            f"position recalculation + PDF generation dispatched to Celery."
+        )
 
         response_serializer = ResultSerializer(instance)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
+        from .tasks import generate_pdf_for_result, recalculate_positions_and_regenerate_pdfs
+
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         old_data = self._capture_old_data(instance)
@@ -445,22 +371,83 @@ class ResultViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             updated_instance = serializer.save()
-            self._handle_post_update_tasks(updated_instance, old_data)
+
+        status_changed = old_data['status'] != updated_instance.status
+        location_changed = any([
+            old_data['class_name'] != updated_instance.class_name,
+            old_data['term'] != updated_instance.term,
+            old_data['academic_year'] != updated_instance.academic_year,
+        ])
+        scores_changed = getattr(updated_instance, '_scores_changed', False)
+
+        # Send email if newly published (fast, keep synchronous)
+        if old_data['status'] != 'PUBLISHED' and updated_instance.status == 'PUBLISHED':
+            EmailNotifier.send_result_published(updated_instance)
+
+        # Determine whether to regenerate PDF for this result only, or the whole class
+        if scores_changed:
+            # Scores changed → positions may shift for everyone → regenerate all
+            logger.info(
+                f"[ResultViewSet.update] Scores changed for result {updated_instance.id} — "
+                f"dispatching full class PDF regeneration."
+            )
+            recalculate_positions_and_regenerate_pdfs.delay(
+                updated_instance.class_name,
+                updated_instance.term,
+                updated_instance.academic_year,
+            )
+        elif status_changed or getattr(updated_instance, '_regenerate_pdf', False):
+            # Only this result's PDF needs updating
+            logger.info(
+                f"[ResultViewSet.update] Status/field changed for result {updated_instance.id} — "
+                f"dispatching single PDF generation."
+            )
+            generate_pdf_for_result.delay(updated_instance.id)
+        elif updated_instance.status == 'PUBLISHED' and not updated_instance.report_card_pdf:
+            logger.info(
+                f"[ResultViewSet.update] Result {updated_instance.id} published but no PDF — "
+                f"dispatching single PDF generation."
+            )
+            generate_pdf_for_result.delay(updated_instance.id)
+
+        # If moved to a different class/term, recalculate old location too
+        if location_changed:
+            logger.info(
+                f"[ResultViewSet.update] Result {updated_instance.id} moved — "
+                f"dispatching recalculation for old location "
+                f"{old_data['class_name']} / {old_data['term']}."
+            )
+            recalculate_positions_and_regenerate_pdfs.delay(
+                old_data['class_name'],
+                old_data['term'],
+                old_data['academic_year'],
+            )
 
         response_serializer = ResultSerializer(updated_instance)
         return Response(response_serializer.data)
 
     def destroy(self, request, *args, **kwargs):
+        from .tasks import recalculate_positions_and_regenerate_pdfs
+
         instance = self.get_object()
         class_info = (instance.class_name, instance.term, instance.academic_year)
 
         with transaction.atomic():
             super().destroy(request, *args, **kwargs)
-            PositionCalculator.recalculate_positions(*class_info)
+
+        # Recalculate positions for the class after deletion
+        recalculate_positions_and_regenerate_pdfs.delay(*class_info)
+        logger.info(
+            f"[ResultViewSet.destroy] Result deleted — recalculation dispatched for "
+            f"{class_info[0]} / {class_info[1]}."
+        )
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    # Action methods
+    # ------------------------------------------------------------------
+    # Action endpoints
+    # ------------------------------------------------------------------
+
     @action(detail=False, methods=['get'])
     def get_student_results(self, request):
         self._auto_publish_scheduled_results()
@@ -534,6 +521,8 @@ class ResultViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def recalculate_positions(self, request):
+        from .tasks import recalculate_positions_and_regenerate_pdfs
+
         class_name = request.data.get('class_name')
         term = request.data.get('term')
         academic_year = request.data.get('academic_year', '2023-2024')
@@ -554,10 +543,15 @@ class ResultViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        PositionCalculator.recalculate_positions(class_name, term, academic_year)
+        recalculate_positions_and_regenerate_pdfs.delay(class_name, term, academic_year)
+
+        logger.info(
+            f"[ResultViewSet.recalculate_positions] Recalculation dispatched for "
+            f"{class_name} / {term} / {academic_year} ({results_count} results)."
+        )
 
         return Response({
-            "message": f"Positions recalculated successfully for {results_count} results",
+            "message": f"Position recalculation + PDF regeneration dispatched for {results_count} results",
             "class_name": class_name,
             "term": term,
             "academic_year": academic_year,
@@ -572,12 +566,14 @@ class ResultViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         return BulkStatusUpdater(data, request.user).execute()
 
-    # Helper methods
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
     def _validate_create_request(self, data):
         if data.get('status') == 'SCHEDULED':
             self._validate_scheduled_date(data.get('scheduled_date'))
 
-        # Check for duplicate
         student_id = data.get('student')
         class_name = data.get('class_name')
         term = data.get('term')
@@ -619,166 +615,13 @@ class ResultViewSet(viewsets.ModelViewSet):
             'academic_year': instance.academic_year
         }
 
-    def _handle_post_create_tasks(self, instance):
-        """Handle tasks after result creation"""
-        # Generate PDF
-        PDFGenerator.generate_for_result(instance)
-
-        # Recalculate positions
-        PositionCalculator.recalculate_positions(
-            instance.class_name, instance.term, instance.academic_year
-        )
-
-        # Send email if published
-        if instance.status == 'PUBLISHED':
-            EmailNotifier.send_result_published(instance)
-
-    def _handle_post_update_tasks(self, instance, old_data):
-        """Handle tasks after result update"""
-        status_changed = old_data['status'] != instance.status
-        location_changed = any([
-            old_data['class_name'] != instance.class_name,
-            old_data['term'] != instance.term,
-            old_data['academic_year'] != instance.academic_year
-        ])
-
-        # Check if scores changed (which would affect positions)
-        scores_changed = getattr(instance, '_scores_changed', False)
-
-        # Handle PDF regeneration for the current instance
-        if status_changed or getattr(instance, '_regenerate_pdf', False):
-            PDFGenerator.generate_for_result(instance)
-        elif instance.status == 'PUBLISHED' and not instance.report_card_pdf:
-            PDFGenerator.generate_for_result(instance)
-
-        # Send email if newly published
-        if old_data['status'] != 'PUBLISHED' and instance.status == 'PUBLISHED':
-            EmailNotifier.send_result_published(instance)
-
-        # Recalculate positions and get changed result IDs
-        changed_result_ids = PositionCalculator.recalculate_positions(
-            instance.class_name, instance.term, instance.academic_year
-        )
-
-        # If scores changed, regenerate PDFs for ALL results in the class/term
-        if scores_changed:
-            self._regenerate_pdfs_for_all_results_in_class(
-                instance.class_name,
-                instance.term,
-                instance.academic_year,
-                exclude_result_id=instance.id,
-                changed_result_ids=changed_result_ids
-            )
-
-        # Recalculate positions for old location if changed
-        if location_changed:
-            changed_result_ids_old = PositionCalculator.recalculate_positions(
-                old_data['class_name'], old_data['term'], old_data['academic_year']
-            )
-            # Regenerate PDFs for ALL results in old location
-            self._regenerate_pdfs_for_all_results_in_class(
-                old_data['class_name'],
-                old_data['term'],
-                old_data['academic_year'],
-                changed_result_ids=changed_result_ids_old
-            )
-
-    def _regenerate_pdfs_for_all_results_in_class(self, class_name, term, academic_year,
-                                                   exclude_result_id=None, changed_result_ids=None):
-        """
-        Regenerate PDFs for ALL results in a class/term regardless of status.
-        This ensures all students have current positions on their report cards.
-        """
-        logger.info(
-            f"Starting PDF regeneration for ALL results in {class_name} - {term} - {academic_year}"
-        )
-
-        # Get ALL results in the class/term
-        all_results = Result.objects.filter(
-            class_name=class_name,
-            term=term,
-            academic_year=academic_year
-        ).select_related('student')
-
-        # Exclude the current result if specified (already regenerated)
-        if exclude_result_id:
-            all_results = all_results.exclude(id=exclude_result_id)
-
-        if not all_results.exists():
-            logger.info(
-                f"No results found for PDF regeneration in {class_name} - {term} - {academic_year}"
-            )
-            return
-
-        total_results = all_results.count()
-        logger.info(f"Found {total_results} results for PDF regeneration")
-
-        # Convert changed_result_ids to set for faster lookup
-        changed_ids_set = set(changed_result_ids) if changed_result_ids else set()
-
-        success_count = 0
-        failed_count = 0
-        position_changed_count = 0
-        position_unchanged_count = 0
-
-        # Regenerate PDFs for ALL results
-        for result in all_results:
-            try:
-                # Check if this result had a position change
-                had_position_change = result.id in changed_ids_set
-
-                if had_position_change:
-                    position_changed_count += 1
-                    logger.info(
-                        f"Regenerating PDF for result ID {result.id} "
-                        f"(Student: {result.student.first_name} {result.student.last_name}) "
-                        f"- POSITION CHANGED - Status: {result.status}"
-                    )
-                else:
-                    position_unchanged_count += 1
-                    logger.info(
-                        f"Regenerating PDF for result ID {result.id} "
-                        f"(Student: {result.student.first_name} {result.student.last_name}) "
-                        f"- Position unchanged but ensuring current class positions - Status: {result.status}"
-                    )
-
-                # Generate PDF regardless of status
-                if PDFGenerator.generate_for_result(result):
-                    success_count += 1
-                    logger.info(f"Successfully regenerated PDF for result ID {result.id}")
-                else:
-                    failed_count += 1
-                    logger.error(f"PDF generation failed for result ID {result.id}")
-
-            except Exception as e:
-                failed_count += 1
-                logger.error(
-                    f"Error regenerating PDF for result ID {result.id}: {str(e)}",
-                    exc_info=True
-                )
-
-        # Summary logging
-        logger.info(
-            f"PDF regeneration completed for {class_name} - {term} - {academic_year}: "
-            f"Total: {total_results}, Success: {success_count}, Failed: {failed_count}, "
-            f"Position Changed: {position_changed_count}, Position Unchanged: {position_unchanged_count}"
-        )
-
-        if failed_count > 0:
-            logger.warning(
-                f"PDF regeneration had {failed_count} failures out of {total_results} attempts "
-                f"for {class_name} - {term} - {academic_year}"
-            )
-
-        # Log specific results that had position changes
-        if changed_result_ids:
-            logger.info(
-                f"Results with position changes in {class_name} - {term} - {academic_year}: "
-                f"{len(changed_result_ids)} results (IDs: {changed_result_ids})"
-            )
-
     def _auto_publish_scheduled_results(self):
-        """Auto-publish scheduled results that are due"""
+        """
+        Lightweight synchronous check — publishes overdue SCHEDULED results
+        and delegates the heavy PDF/position work to Celery.
+        """
+        from .tasks import recalculate_positions_and_regenerate_pdfs
+
         now = timezone.now()
         scheduled_results = Result.objects.filter(
             status='SCHEDULED', scheduled_date__lte=now
@@ -788,7 +631,7 @@ class ResultViewSet(viewsets.ModelViewSet):
             return 0
 
         updated_classes_terms = set()
-        published_results = []  # Track published results for PDF regeneration
+        count = 0
 
         with transaction.atomic():
             for result in scheduled_results:
@@ -797,35 +640,31 @@ class ResultViewSet(viewsets.ModelViewSet):
                 result.save(update_fields=['status', 'published_date'])
 
                 updated_classes_terms.add((result.class_name, result.term, result.academic_year))
-                published_results.append(result)
                 EmailNotifier.send_result_published(result)
+                count += 1
 
-        # Recalculate positions for affected classes and regenerate PDFs
-        for class_info in updated_classes_terms:
-            changed_result_ids = PositionCalculator.recalculate_positions(*class_info)
+                logger.info(
+                    f"[_auto_publish] Published scheduled result {result.id} — "
+                    f"Student: {_student_full_name(result.student)}"
+                )
 
-            self._regenerate_pdfs_for_all_results_in_class(
-                class_info[0],  # class_name
-                class_info[1],  # term
-                class_info[2],  # academic_year
-                changed_result_ids=changed_result_ids
+        for class_name, term, academic_year in updated_classes_terms:
+            recalculate_positions_and_regenerate_pdfs.delay(class_name, term, academic_year)
+            logger.info(
+                f"[_auto_publish] Dispatched Celery recalculation for "
+                f"{class_name} / {term} / {academic_year}."
             )
 
-        count = len(scheduled_results)
-        if count > 0:
-            logger.info(f"Auto-published {count} scheduled results and regenerated PDFs")
-
+        logger.info(f"[_auto_publish] Auto-published {count} result(s).")
         return count
 
     def _build_student_results_queryset(self, student_id, class_name, term, user):
-        """Build queryset for student results"""
         try:
             student = CustomUser.objects.get(id=student_id)
             class_name = class_name or student.class_name
         except CustomUser.DoesNotExist:
             raise ValidationError(f"Student with ID {student_id} not found")
 
-        # Build queryset with proper prefetch
         queryset = Result.objects.select_related('student').prefetch_related(
             Prefetch(
                 'course_results',
@@ -844,20 +683,16 @@ class ResultViewSet(viewsets.ModelViewSet):
         return queryset
 
     def _build_class_results_queryset(self, class_name, term, user):
-        """Build queryset for class results"""
         current_students = CustomUser.objects.filter(
             class_name=class_name, role='student'
         ).values_list('id', flat=True)
 
-        # Build queryset with proper prefetch
         queryset = Result.objects.select_related('student').prefetch_related(
             Prefetch(
                 'course_results',
                 queryset=CourseResult.objects.select_related('class_course__course')
             )
-        ).filter(
-            class_name=class_name, student_id__in=current_students
-        )
+        ).filter(class_name=class_name, student_id__in=current_students)
 
         if term:
             queryset = queryset.filter(term=term)
@@ -871,18 +706,15 @@ class ResultViewSet(viewsets.ModelViewSet):
 
 
 # ---------------------------------------------------------------------------
-# Service classes
+# Service classes (synchronous — used by tasks and admin)
 # ---------------------------------------------------------------------------
 
 class PositionCalculator:
     @staticmethod
     def recalculate_positions(class_name, term, academic_year="2023-2024"):
-        """Recalculate positions for all results in a class and term"""
         with transaction.atomic():
-            # Update class size
             ClassSize.update_class_size(class_name, term, academic_year)
 
-            # Get all results with optimized query
             results = Result.objects.filter(
                 class_name=class_name, term=term, academic_year=academic_year
             ).select_related('student').prefetch_related(
@@ -893,28 +725,26 @@ class PositionCalculator:
             )
 
             if not results.exists():
-                logger.info(f"No results found for {class_name} - {term}")
+                logger.info(f"[PositionCalculator] No results found for {class_name} - {term}")
                 return []
 
-            # Calculate overall positions and track changes
             changed_result_ids = PositionCalculator._calculate_overall_positions(results)
-
-            # Calculate course positions
             PositionCalculator._calculate_course_positions(class_name, term, academic_year)
 
+            logger.info(
+                f"[PositionCalculator] Recalculated positions for {class_name} / {term} — "
+                f"{len(changed_result_ids)} position change(s)."
+            )
             return changed_result_ids
 
     @staticmethod
     def _calculate_overall_positions(results):
-        """Calculate overall positions for results and return IDs of changed results"""
-        # Sort by total score, then average score (descending)
         sorted_results = sorted(
             results,
             key=lambda r: (r.total_score, r.average_score),
             reverse=True
         )
 
-        # Track which results have position changes
         changed_result_ids = []
         updates = []
         current_position = 1
@@ -933,7 +763,6 @@ class PositionCalculator:
 
             previous_scores = current_scores
 
-        # Bulk update positions
         if updates:
             Result.objects.bulk_update(updates, ['overall_position'])
 
@@ -941,7 +770,6 @@ class PositionCalculator:
 
     @staticmethod
     def _calculate_course_positions(class_name, term, academic_year):
-        """Calculate course positions for all courses in a class and term"""
         class_courses = ClassCourse.objects.filter(class_name=class_name, term=term)
 
         for class_course in class_courses:
@@ -955,12 +783,10 @@ class PositionCalculator:
             if not course_results.exists():
                 continue
 
-            # Sort by total score (descending)
             sorted_course_results = sorted(
                 course_results, key=lambda cr: cr.total_score, reverse=True
             )
 
-            # Calculate positions and prepare for bulk update
             updates = []
             current_position = 1
             previous_score = None
@@ -975,43 +801,45 @@ class PositionCalculator:
 
                 previous_score = course_result.total_score
 
-            # Bulk update
             if updates:
                 CourseResult.objects.bulk_update(updates, ['position'])
 
 
 class PDFGenerator:
+    """
+    Synchronous PDF helper — used by the signal (post_save) and admin.
+    Views now call the async Celery task instead.
+    """
+
     @staticmethod
     def generate_for_result(result):
-        """Generate PDF for a result with detailed logging"""
         try:
-            logger.debug(f"Starting PDF generation for result ID {result.id}")
+            logger.debug(f"[PDFGenerator] Starting PDF generation for result {result.id}")
             result.refresh_from_db()
 
             logger.info(
-                f"Generating PDF for result {result.id} - Student: {result.student.first_name}, "
+                f"[PDFGenerator] Generating PDF — result {result.id}, "
+                f"Student: {_student_full_name(result.student)}, "
                 f"Class: {result.class_name}, Term: {result.term}"
             )
 
             pdf_content = generate_report_card_pdf(result)
             if not pdf_content:
-                logger.error(f"PDF generation returned empty content for result {result.id}")
+                logger.error(f"[PDFGenerator] Empty PDF content for result {result.id}")
                 return False
 
             filename = result.get_report_card_filename()
-            logger.debug(f"Generated filename: {filename}")
-
             pdf_file = ContentFile(pdf_content, name=filename)
-
-            # Save the PDF file
             result.report_card_pdf.save(filename, pdf_file, save=True)
-            logger.info(f"PDF saved successfully for result {result.id} at {result.report_card_pdf.url}")
 
+            logger.info(
+                f"[PDFGenerator] PDF saved for result {result.id} at '{result.report_card_pdf.url}'"
+            )
             return True
 
         except Exception as e:
             logger.error(
-                f"PDF generation error for result {result.id}: {str(e)}",
+                f"[PDFGenerator] Error for result {result.id}: {e}",
                 exc_info=True
             )
             return False
@@ -1020,11 +848,7 @@ class PDFGenerator:
 class EmailNotifier:
     @staticmethod
     def send_result_published(result):
-        """Send email notification when result is published"""
         try:
-            from sib_api_v3_sdk import Configuration, ApiClient, TransactionalEmailsApi, SendSmtpEmail
-            from sib_api_v3_sdk.rest import ApiException
-
             configuration = Configuration()
             configuration.api_key['api-key'] = os.getenv('BREVO_API_KEY')
 
@@ -1049,10 +873,10 @@ class EmailNotifier:
             )
 
             api_instance.send_transac_email(send_smtp_email)
-            logger.info(f"Email sent to {student.email} for result {result.id}")
+            logger.info(f"[EmailNotifier] Email sent to {student.email} for result {result.id}")
 
         except Exception as e:
-            logger.error(f"Failed to send email for result {result.id}: {e}")
+            logger.error(f"[EmailNotifier] Failed to send email for result {result.id}: {e}")
 
 
 class BulkStatusUpdater:
@@ -1064,24 +888,65 @@ class BulkStatusUpdater:
         self.user = user
 
     def execute(self):
-        """Execute bulk status update"""
+        from .tasks import bulk_update_status_task
+
         if self.status == 'SCHEDULED' and not self.scheduled_date:
             return Response(
                 {"error": "scheduled_date required for SCHEDULED status"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Validate completeness if not updating to DRAFT
         if self.status != 'DRAFT':
             validation_error = self._validate_completeness()
             if validation_error:
                 return validation_error
 
-        # Perform bulk update
-        return self._perform_bulk_update()
+        # Count how many results will be affected (for the response message)
+        students = CustomUser.objects.filter(
+            class_name=self.class_name, role='student'
+        ).values_list('id', flat=True)
+
+        results_qs = Result.objects.filter(
+            class_name=self.class_name,
+            term=self.term,
+            student_id__in=students,
+        )
+        if self.status == 'PUBLISHED':
+            results_qs = results_qs.exclude(status='PUBLISHED')
+
+        results_count = results_qs.count()
+
+        if results_count == 0:
+            return Response({"message": "No results to update"})
+
+        # Dispatch async
+        scheduled_date_iso = (
+            self.scheduled_date.isoformat() if self.scheduled_date else None
+        )
+        bulk_update_status_task.delay(
+            self.class_name,
+            self.term,
+            self.status,
+            scheduled_date_iso=scheduled_date_iso,
+            user_email=self.user.email,
+        )
+
+        logger.info(
+            f"[BulkStatusUpdater] Dispatched bulk_update_status_task for "
+            f"{self.class_name} / {self.term} → {self.status} "
+            f"({results_count} result(s), triggered by {self.user.email})."
+        )
+
+        return Response({
+            "message": (
+                f"Bulk status update to '{self.status}' dispatched for "
+                f"{results_count} result(s) in {self.class_name} / {self.term}. "
+                f"PDFs will be regenerated automatically."
+            ),
+            "queued_count": results_count,
+        })
 
     def _validate_completeness(self):
-        """Validate that all results are complete"""
         students = CustomUser.objects.filter(class_name=self.class_name, role='student')
         if not students.exists():
             return Response(
@@ -1098,7 +963,6 @@ class BulkStatusUpdater:
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Check for missing/incomplete results
         missing_results, incomplete_results = [], []
 
         for student in students:
@@ -1114,7 +978,6 @@ class BulkStatusUpdater:
                 })
                 continue
 
-            # Check course completeness
             student_courses = set(
                 result.course_results.values_list('class_course_id', flat=True)
             )
@@ -1138,128 +1001,10 @@ class BulkStatusUpdater:
 
         return None
 
-    def _perform_bulk_update(self):
-        """Perform the actual bulk update"""
-        students = CustomUser.objects.filter(
-            class_name=self.class_name, role='student'
-        ).values_list('id', flat=True)
 
-        # Get results to update
-        results_query = Result.objects.filter(
-            class_name=self.class_name, term=self.term, student_id__in=students
-        )
-
-        if self.status == 'PUBLISHED':
-            results_query = results_query.exclude(status='PUBLISHED')
-
-        results = list(results_query.select_related('student'))
-
-        if not results:
-            return Response({"message": "No results to update"})
-
-        # Perform updates
-        with transaction.atomic():
-            updated_count = self._update_results(results)
-
-            # Recalculate positions for the entire class
-            changed_result_ids = PositionCalculator.recalculate_positions(
-                self.class_name, self.term
-            )
-
-            # Regenerate PDFs for ALL results in the class (not just updated ones)
-            self._regenerate_all_pdfs_in_class(changed_result_ids)
-
-        return Response({
-            "message": f"Successfully updated {updated_count} results to {self.status}",
-            "updated_count": updated_count
-        })
-
-    def _regenerate_all_pdfs_in_class(self, changed_result_ids):
-        """Regenerate PDFs for ALL results in the class"""
-        logger.info(
-            f"Starting PDF regeneration for ALL results in {self.class_name} - {self.term} (Bulk Update)"
-        )
-
-        # Get ALL results in the class/term
-        all_results = Result.objects.filter(
-            class_name=self.class_name,
-            term=self.term
-        ).select_related('student')
-
-        if not all_results.exists():
-            logger.info(
-                f"No results found for PDF regeneration in {self.class_name} - {self.term}"
-            )
-            return
-
-        changed_ids_set = set(changed_result_ids) if changed_result_ids else set()
-        total_results = all_results.count()
-        success_count = 0
-        failed_count = 0
-
-        logger.info(
-            f"Regenerating PDFs for ALL {total_results} results in {self.class_name} - {self.term}"
-        )
-
-        for result in all_results:
-            try:
-                had_position_change = result.id in changed_ids_set
-
-                logger.info(
-                    f"Regenerating PDF for result ID {result.id} "
-                    f"(Student: {result.student.first_name} {result.student.last_name}) "
-                    f"- Status: {result.status} - Position Changed: {had_position_change}"
-                )
-
-                if PDFGenerator.generate_for_result(result):
-                    success_count += 1
-                else:
-                    failed_count += 1
-
-            except Exception as e:
-                failed_count += 1
-                logger.error(f"Error regenerating PDF for result ID {result.id}: {str(e)}")
-
-        logger.info(
-            f"Bulk PDF regeneration completed for {self.class_name} - {self.term}: "
-            f"Total: {total_results}, Success: {success_count}, Failed: {failed_count}"
-        )
-
-    def _update_results(self, results):
-        """Update individual results"""
-        updated_count = 0
-
-        for result in results:
-            old_status = result.status
-
-            # Update status and related fields
-            result.status = self.status
-            if self.status == 'PUBLISHED':
-                result.published_date = timezone.now()
-            elif self.status == 'SCHEDULED':
-                result.scheduled_date = self.scheduled_date
-            elif self.status == 'DRAFT':
-                result.scheduled_date = None
-                result.published_date = None
-
-            result.save(update_fields=['status', 'published_date', 'scheduled_date'])
-            updated_count += 1
-
-            # Handle side effects
-            if old_status != 'PUBLISHED' and self.status == 'PUBLISHED':
-                EmailNotifier.send_result_published(result)
-
-            # Log the change
-            ResultChangeLog.objects.create(
-                result=result,
-                changed_by=self.user.email,
-                field_name="status (bulk update)",
-                previous_value=old_status,
-                new_value=self.status
-            )
-
-        return updated_count
-
+# ---------------------------------------------------------------------------
+# StudentResultsViewSet
+# ---------------------------------------------------------------------------
 
 class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ResultSerializer
@@ -1278,7 +1023,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def send_result_published_email(self, result):
-        """Send email notification when result is published"""
         try:
             configuration = Configuration()
             configuration.api_key['api-key'] = os.getenv('BREVO_API_KEY')
@@ -1296,9 +1040,9 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
                 <html>
                 <body>
                     <p>Dear {student_name},</p>
-                    <p>Your academic results for <strong>{result.class_name}</strong> - <strong>{result.term} term </strong> have been published and are now available for viewing.</p>
+                    <p>Your academic results for <strong>{result.class_name}</strong> -
+                       <strong>{result.term} term</strong> have been published.</p>
                     <p>You can access your results by logging into your student portal.</p>
-                    <p>If you have any questions about your results, please contact your class teacher or the school administration.</p>
                     <p>Best regards,<br>School Administration</p>
                 </body>
                 </html>
@@ -1306,14 +1050,25 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
             api_response = api_instance.send_transac_email(send_smtp_email)
-            logger.info(f"Result published email sent successfully to {student.email}: {api_response}")
+            logger.info(
+                f"[StudentResultsViewSet] Email sent to {student.email} "
+                f"for result {result.id}: {api_response}"
+            )
 
         except ApiException as e:
-            logger.error(f"Exception when sending result published email to {student.email}: {e}")
+            logger.error(
+                f"[StudentResultsViewSet] ApiException sending email to "
+                f"{result.student.email}: {e}"
+            )
         except Exception as e:
-            logger.error(f"Unexpected error when sending result published email to {student.email}: {e}")
+            logger.error(
+                f"[StudentResultsViewSet] Unexpected error sending email to "
+                f"{result.student.email}: {e}"
+            )
 
     def _check_scheduled_results(self):
+        from .tasks import recalculate_positions_and_regenerate_pdfs
+
         try:
             now = timezone.now()
             scheduled_results = Result.objects.filter(
@@ -1322,23 +1077,28 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
             published_count = 0
+            updated_classes = set()
+
             for result in scheduled_results:
                 logger.info(
-                    f"Publishing scheduled result: {result.id} - "
-                    f"{result.student.first_name} {result.student.last_name}"
+                    f"[StudentResultsViewSet._check_scheduled] Publishing result {result.id} — "
+                    f"{_student_full_name(result.student)}"
                 )
                 result.status = 'PUBLISHED'
                 result.published_date = now
                 result.save()
 
-                # Send email notification for automatically published results
                 self.send_result_published_email(result)
-
+                updated_classes.add((result.class_name, result.term, result.academic_year))
                 published_count += 1
 
+            for class_name, term, academic_year in updated_classes:
+                recalculate_positions_and_regenerate_pdfs.delay(class_name, term, academic_year)
+
             return published_count
+
         except Exception as e:
-            logger.error(f"Error while checking scheduled results: {str(e)}")
+            logger.error(f"[StudentResultsViewSet._check_scheduled] Error: {e}")
             raise
 
     def list(self, request, *args, **kwargs):
@@ -1349,7 +1109,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
 
         if term:
             queryset = queryset.filter(term=term)
-
         if class_name:
             queryset = queryset.filter(class_name=class_name)
 
@@ -1358,7 +1117,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'])
     def current_class(self, request):
-        """Get only the results for the student's current class."""
         user = request.user
 
         if not user.role == 'student':
@@ -1369,7 +1127,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
 
         self._check_scheduled_results()
 
-        # Get results for current class only
         queryset = Result.objects.filter(
             student=user,
             class_name=user.class_name,
@@ -1379,7 +1136,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
             Q(status='SCHEDULED', scheduled_date__lte=timezone.now())
         )
 
-        # Allow filtering by term
         term = request.query_params.get('term')
         if term:
             queryset = queryset.filter(term=term)
@@ -1389,7 +1145,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'])
     def previous_classes(self, request):
-        """Get results for the student's previous classes (excluding current class)."""
         user = request.user
 
         if not user.role == 'student':
@@ -1398,7 +1153,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Check for required parameters
         class_name = request.query_params.get('class_name')
         term = request.query_params.get('term')
 
@@ -1410,17 +1164,14 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
 
         self._check_scheduled_results()
 
-        # Get current class name
         current_class = user.class_name
 
-        # Check if student has class_history attribute
         if not hasattr(user, 'class_history'):
             return Response(
                 {"detail": "No class history available for this student."},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Get previous classes from history, excluding current class
         previous_classes = user.class_history.exclude(
             class_name=current_class
         ).values_list('class_name', flat=True).distinct()
@@ -1431,14 +1182,12 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Check if requested class is in previous classes
         if class_name not in previous_classes:
             return Response(
                 {"detail": f"Student has no history in class {class_name}."},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Get results for specific class and term only
         queryset = Result.objects.filter(
             student=user,
             class_name=class_name,
@@ -1449,7 +1198,6 @@ class StudentResultsViewSet(viewsets.ReadOnlyModelViewSet):
             Q(status='SCHEDULED', scheduled_date__lte=timezone.now())
         )
 
-        # If no results found for this specific class and term
         if not queryset.exists():
             return Response(
                 {"detail": f"No results found for class {class_name}, term {term}."},

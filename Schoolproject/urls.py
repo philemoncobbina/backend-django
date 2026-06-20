@@ -11,8 +11,6 @@ urlpatterns = [
     path('api/', include('Admissionapp.urls')),
     path('api/', include('jobapplication.urls')),
     path('api/', include('jobposting.urls')),  # Include job_application app's URLs
-    path('api/', include('momo_pay.urls')),
-    path('api/', include('hubtel.urls')),
     path('api/', include('Reservationapp.urls')),
     path('api/', include('student_billing.urls')),
     path('api/', include('tickets.urls')),
