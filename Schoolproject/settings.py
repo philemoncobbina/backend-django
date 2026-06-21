@@ -90,7 +90,7 @@ ALLOWED_HOSTS: list[str] = [
     "127.0.0.1",
     "13.60.29.130",
     "cobbina.uk",
-    "api.plvcmonline.uk",
+    "api.cobbina.uk",
     "backend-django-5-clix.onrender.com",
 ]
 
@@ -99,12 +99,14 @@ CORS_ALLOWED_ORIGINS: list[str] = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://13.60.29.130:8000",
+    "http://api.cobbina.uk",
     "http://cobbina.uk",
 ]
 
 CSRF_TRUSTED_ORIGINS: list[str] = [
     "http://localhost:5174",
     "http://13.60.29.130:8000",
+    "http://api.cobbina.uk", 
     "http://cobbina.uk",
 ]
 
