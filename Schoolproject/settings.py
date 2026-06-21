@@ -86,35 +86,29 @@ SITE_ID = 1
 # =============================================================================
 
 ALLOWED_HOSTS: list[str] = [
+    "api.cobbina.uk",
     "localhost",
     "127.0.0.1",
-    "13.60.29.130",
-    "api.cobbina.uk",
-    "cobbina.uk",
-    ".cobbina.uk",  # Wildcard for all subdomains
-    "backend-django-5-clix.onrender.com",
 ]
 
-# Also update these to include both HTTP and HTTPS
 CORS_ALLOWED_ORIGINS: list[str] = [
-    "http://localhost:4200",
+    "https://cobbina.uk",
+    "https://www.cobbina.uk",
+    "https://student.cobbina.uk",
+    "https://admin.cobbina.uk",
     "http://localhost:5173",
-    "http://localhost:5174",
-    "http://13.60.29.130:8000",
-    "https://api.cobbina.uk",  # Add HTTPS
-    "http://api.cobbina.uk",
-    "https://cobbina.uk",  # Add HTTPS
-    "http://cobbina.uk",
+    "http://localhost:4200",
 ]
 
 CSRF_TRUSTED_ORIGINS: list[str] = [
-    "http://localhost:5174",
-    "http://13.60.29.130:8000",
-    "https://api.cobbina.uk",  # Add HTTPS
-    "http://api.cobbina.uk",
-    "https://cobbina.uk",  # Add HTTPS
-    "http://cobbina.uk",
+    "https://api.cobbina.uk",
+    "https://cobbina.uk",
+    "https://www.cobbina.uk",
+    "https://student.cobbina.uk",
+    "https://admin.cobbina.uk",
 ]
+
+CORS_ORIGIN_ALLOW_ALL = False
 
 
 
