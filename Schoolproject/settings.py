@@ -88,7 +88,7 @@ ALLOWED_HOSTS: list[str] = [
     "localhost",
     "127.0.0.1",
     "13.60.29.130",
-    "plvcmonline.uk",
+    "cobbina.uk",
     "api.plvcmonline.uk",
     "backend-django-5-clix.onrender.com",
 ]
@@ -98,13 +98,13 @@ CORS_ALLOWED_ORIGINS: list[str] = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://13.60.29.130:8000",
-    "https://plvcmonline.uk",
+    "http://cobbina.uk",
 ]
 
 CSRF_TRUSTED_ORIGINS: list[str] = [
     "http://localhost:5174",
     "http://13.60.29.130:8000",
-    "https://plvcmonline.uk",
+    "http://cobbina.uk",
 ]
 
 CORS_ORIGIN_ALLOW_ALL = True
@@ -208,12 +208,13 @@ TEMPLATES = [
 # =============================================================================
 # Database
 # =============================================================================
+import dj_database_url
 
 DATABASES: dict = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-    }
+    "default": dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=600,
+    )
 }
 
 # =============================================================================

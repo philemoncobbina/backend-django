@@ -1,28 +1,39 @@
 # Environment files
 .env
 
-# Ignore database file
+# Database
 db.sqlite3
 *.sqlite3
 
-# Ignore migration files that shouldn't be versioned
+# Python cache
 *.log
 *.pot
 *.pyc
 *.pyo
 __pycache__/
 
-# Ignore virtual environment directories
+# Virtual environments
 venv/
 env/
+env*/
 
-# Ignore other potentially sensitive or machine-specific files
+# Media files (IGNORE ALL MEDIA)
+media/
+
+# Sensitive files
 *.pem
 *.key
 *.bak
 *.swp
 
-# Ignore specific images in media/screenshots
-media/screenshots/pexels-tima-miroshnichenko-5453808_VSs1JsR.jpg
-media/screenshots/pexels-tima-miroshnichenko-5453808_usfO4cl.jpg
-media/screenshots/*.jpg
+# Node modules
+node_modules/
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
