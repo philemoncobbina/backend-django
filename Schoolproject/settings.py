@@ -73,7 +73,8 @@ if _missing:
 # Core
 # =============================================================================
 
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False") == "True"
+
 
 WSGI_APPLICATION = "Schoolproject.wsgi.application"
 ROOT_URLCONF      = "Schoolproject.urls"
