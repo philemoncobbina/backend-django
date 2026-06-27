@@ -345,6 +345,8 @@ CELERY_TIMEZONE          = "UTC"
 
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
+RATELIMIT_IP_META_KEY = 'HTTP_X_FORWARDED_FOR'
+
 # =============================================================================
 # Celery Beat Schedule
 # =============================================================================
