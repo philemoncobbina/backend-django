@@ -96,6 +96,8 @@ CORS_ALLOWED_ORIGINS: list[str] = [
     "https://www.cobbina.uk",
     "https://student.cobbina.uk",
     "https://admin.cobbina.uk",
+    "http://localhost:5174",
+    "http://localhost:5175",
     "http://localhost:5173",
     "http://localhost:4200",
 ]
@@ -103,6 +105,9 @@ CORS_ALLOWED_ORIGINS: list[str] = [
 CSRF_TRUSTED_ORIGINS: list[str] = [
     "https://api.cobbina.uk",
     "https://cobbina.uk",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5173",
     "https://www.cobbina.uk",
     "https://student.cobbina.uk",
     "https://admin.cobbina.uk",
