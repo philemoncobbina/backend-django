@@ -38,6 +38,7 @@ def _actor_kwargs(user):
             "user_last_name": "",
             "user_email": "",
         }
+
     return {
         "user_first_name": user.first_name,
         "user_last_name": user.last_name,
@@ -52,13 +53,20 @@ class BillingTemplate(models.Model):
         ("third", "Third Term"),
     )
 
-    academic_year = models.CharField(max_length=9, help_text="Academic year e.g., '2024-2025'")
+    academic_year = models.CharField(
+        max_length=9,
+        help_text="Academic year e.g., '2024-2025'",
+    )
     class_name = models.CharField(
         max_length=10,
         choices=CustomUser.CLASS_CHOICES,
         help_text="Class this billing applies to",
     )
-    term = models.CharField(max_length=10, choices=TERM_CHOICES, help_text="Academic term")
+    term = models.CharField(
+        max_length=10,
+        choices=TERM_CHOICES,
+        help_text="Academic term",
+    )
     created_date = models.DateTimeField(default=timezone.now)
     created_by = models.ForeignKey(
         CustomUser,
@@ -89,10 +97,14 @@ class BillingTemplate(models.Model):
         actor = _actor_or_fallback(self, self.created_by)
 
         if is_update and old_due_date and old_due_date != self.due_date:
-            self.propagate_due_date_change(old_due_date=old_due_date, actor=actor)
+            self.propagate_due_date_change(
+                old_due_date=old_due_date,
+                actor=actor,
+            )
 
     def propagate_due_date_change(self, old_due_date, actor=None):
         actor = actor or self.created_by
+
         bills = (
             StudentBill.objects
             .filter(billing_template=self)
@@ -106,7 +118,9 @@ class BillingTemplate(models.Model):
             old_value = str(bill.due_date) if bill.due_date else ""
             new_value = str(self.due_date)
 
-            StudentBill.objects.filter(pk=bill.pk).update(due_date=self.due_date)
+            StudentBill.objects.filter(pk=bill.pk).update(
+                due_date=self.due_date,
+            )
             bill.due_date = self.due_date
 
             StudentBillLog.objects.create(
@@ -125,6 +139,7 @@ class BillingTemplate(models.Model):
 
     def recalculate_linked_bills(self, actor=None):
         actor = actor or self.created_by
+
         bills = (
             StudentBill.objects
             .filter(billing_template=self)
@@ -147,7 +162,10 @@ class BillingItem(models.Model):
         related_name="billing_items",
     )
     item_name = models.CharField(max_length=100)
-    category = models.CharField(max_length=50, help_text="Category name (user-defined)")
+    category = models.CharField(
+        max_length=50,
+        help_text="Category name (user-defined)",
+    )
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -193,7 +211,9 @@ class BillingItem(models.Model):
     def delete(self, *args, **kwargs):
         template = self.billing_template
         actor = _actor_or_fallback(self, self.created_by)
+
         super().delete(*args, **kwargs)
+
         template.recalculate_linked_bills(actor=actor)
 
     def _create_change_logs(self, old_values):
@@ -208,6 +228,7 @@ class BillingItem(models.Model):
 
         for field_name, new_value in current_values.items():
             old_value = old_values.get(field_name, "")
+
             if old_value != new_value:
                 logs_to_create.append(
                     BillingItemLog(
@@ -229,7 +250,11 @@ class BillingItem(models.Model):
 
 
 class BillingItemLog(models.Model):
-    billing_item = models.ForeignKey(BillingItem, on_delete=models.CASCADE, related_name="logs")
+    billing_item = models.ForeignKey(
+        BillingItem,
+        on_delete=models.CASCADE,
+        related_name="logs",
+    )
     field_name = models.CharField(max_length=100)
     old_value = models.TextField(null=True, blank=True)
     new_value = models.TextField(null=True, blank=True)
@@ -266,8 +291,15 @@ class StudentBill(models.Model):
         limit_choices_to={"role": "student"},
         related_name="bills",
     )
-    billing_template = models.ForeignKey(BillingTemplate, on_delete=models.CASCADE)
-    bill_number = models.CharField(max_length=30, unique=True, blank=True)
+    billing_template = models.ForeignKey(
+        BillingTemplate,
+        on_delete=models.CASCADE,
+    )
+    bill_number = models.CharField(
+        max_length=30,
+        unique=True,
+        blank=True,
+    )
 
     first_name = models.CharField(max_length=30, blank=True)
     last_name = models.CharField(max_length=30, blank=True)
@@ -285,13 +317,29 @@ class StudentBill(models.Model):
         help_text="Discount applied to this bill",
     )
     discount_reason = models.TextField(blank=True, null=True)
-    discount_approved_by = models.CharField(max_length=100, blank=True, null=True)
+    discount_approved_by = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+    )
 
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="DRAFT")
-    payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, default="pending")
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default="DRAFT",
+    )
+    payment_status = models.CharField(
+        max_length=10,
+        choices=PAYMENT_STATUS_CHOICES,
+        default="pending",
+    )
 
     generated_date = models.DateTimeField(default=timezone.now)
     scheduled_date = models.DateTimeField(null=True, blank=True)
+
+    # Stores the exact date and time the bill was first published.
+    published_at = models.DateTimeField(null=True, blank=True)
+
     due_date = models.DateField()
     created_date = models.DateTimeField(default=timezone.now)
     created_by = models.ForeignKey(
@@ -300,8 +348,16 @@ class StudentBill(models.Model):
         related_name="created_student_bills",
     )
 
-    total_amount_due = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    total_amount_due = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    total_paid = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
     notes = models.TextField(blank=True, null=True)
 
     pdf_file = models.FileField(
@@ -318,6 +374,7 @@ class StudentBill(models.Model):
             models.Index(fields=["student", "generated_date"]),
             models.Index(fields=["billing_template"]),
             models.Index(fields=["student", "status"]),
+            models.Index(fields=["status", "published_at"]),
         ]
 
     def __str__(self):
@@ -344,12 +401,23 @@ class StudentBill(models.Model):
 
         if not self.bill_number:
             self.bill_number = self._generate_unique_bill_number()
+
         if not self.due_date:
             self.due_date = self.billing_template.due_date
+
         if not self.first_name:
             self.first_name = self.student.first_name
+
         if not self.last_name:
             self.last_name = self.student.last_name
+
+        # Set exact publish timestamp when the bill is first published.
+        # This preserves the first published time even if the bill is edited later.
+        if self.status == "PUBLISHED" and not self.published_at:
+            if is_new:
+                self.published_at = timezone.now()
+            elif old_bill and old_bill.status != "PUBLISHED":
+                self.published_at = timezone.now()
 
         if is_new:
             self._refresh_non_receipt_financials_in_memory()
@@ -370,12 +438,15 @@ class StudentBill(models.Model):
 
         if not is_new and old_bill:
             discount_changed = old_bill.discount_amount != self.discount_amount
-            non_financial_visible_changed = any([
-                (old_bill.discount_reason or "") != (self.discount_reason or ""),
-                (old_bill.discount_approved_by or "") != (self.discount_approved_by or ""),
-                old_bill.status != self.status,
-                (old_bill.notes or "") != (self.notes or ""),
-            ])
+
+            non_financial_visible_changed = any(
+                [
+                    (old_bill.discount_reason or "") != (self.discount_reason or ""),
+                    (old_bill.discount_approved_by or "") != (self.discount_approved_by or ""),
+                    old_bill.status != self.status,
+                    (old_bill.notes or "") != (self.notes or ""),
+                ]
+            )
 
             if discount_changed:
                 self.apply_financial_recalculation(
@@ -402,9 +473,12 @@ class StudentBill(models.Model):
     def _queue_pdf_generation(self):
         try:
             from .tasks import generate_bill_pdf_task
+
             generate_bill_pdf_task.delay(self.pk)
         except Exception as e:
-            logger.error(f"Failed to queue PDF generation for bill {self.bill_number}: {e}")
+            logger.error(
+                f"Failed to queue PDF generation for bill {self.bill_number}: {e}"
+            )
 
     def generate_pdf(self):
         try:
@@ -413,32 +487,46 @@ class StudentBill(models.Model):
             pdf_content = generate_bill_pdf(self)
             filename = f"bill_{self.bill_number}.pdf"
             self.pdf_file.save(filename, ContentFile(pdf_content), save=False)
-            StudentBill.objects.filter(pk=self.pk).update(pdf_file=self.pdf_file.name)
+
+            StudentBill.objects.filter(pk=self.pk).update(
+                pdf_file=self.pdf_file.name,
+            )
+
             return True
         except Exception as e:
-            logger.error(f"Failed to generate PDF for bill {self.bill_number}: {e}")
+            logger.error(
+                f"Failed to generate PDF for bill {self.bill_number}: {e}"
+            )
             return False
 
     def _generate_unique_bill_number(self):
         year = self.billing_template.academic_year.replace("-", "")
-        term_map = {"first": "1", "second": "2", "third": "3"}
+        term_map = {
+            "first": "1",
+            "second": "2",
+            "third": "3",
+        }
         term_code = term_map.get(self.billing_template.term, "1")
         class_code = self.billing_template.class_name[:3].upper()
 
         while True:
             suffix = uuid.uuid4().hex[:8].upper()
             candidate = f"BILL{year}{term_code}{class_code}{suffix}"
+
             if len(candidate) > 30:
                 candidate = candidate[:30]
+
             if not StudentBill.objects.filter(bill_number=candidate).exists():
                 return candidate
 
     def _sum_receipts_from_db(self, exclude_receipt_pk=None):
         qs = PaymentReceipt.objects.filter(student_bill=self)
+
         if exclude_receipt_pk is not None:
             qs = qs.exclude(pk=exclude_receipt_pk)
 
         raw_total = qs.aggregate(total=Sum("amount_paid"))["total"]
+
         return (
             Decimal(str(raw_total)).quantize(TWOPLACES, rounding=ROUND_DOWN)
             if raw_total is not None
@@ -454,7 +542,9 @@ class StudentBill(models.Model):
             .exclude(pk=self.pk)
             .aggregate(arrears=Sum(F("total_amount_due") - F("total_paid")))
         )
+
         value = result["arrears"] or Decimal("0.00")
+
         return Decimal(str(value)).quantize(TWOPLACES, rounding=ROUND_DOWN)
 
     def _calculate_total_amount_from_db(self):
@@ -468,9 +558,10 @@ class StudentBill(models.Model):
             or Decimal("0.00")
         )
 
-        total = (base_amount + custom_charges_total - self.discount_amount).quantize(
-            TWOPLACES, rounding=ROUND_DOWN
-        )
+        total = (
+            base_amount + custom_charges_total - self.discount_amount
+        ).quantize(TWOPLACES, rounding=ROUND_DOWN)
+
         return max(total, Decimal("0.00"))
 
     def _refresh_non_receipt_financials_in_memory(self):
@@ -482,7 +573,11 @@ class StudentBill(models.Model):
                 self.billing_template.billing_items.aggregate(total=Sum("amount"))["total"]
                 or Decimal("0.00")
             )
-            total = (base_amount - self.discount_amount).quantize(TWOPLACES, rounding=ROUND_DOWN)
+
+            total = (
+                base_amount - self.discount_amount
+            ).quantize(TWOPLACES, rounding=ROUND_DOWN)
+
             self.total_amount_due = max(total, Decimal("0.00"))
             self.previous_arrears = Decimal("0.00")
 
@@ -521,7 +616,7 @@ class StudentBill(models.Model):
             }
 
             locked_bill.total_paid = locked_bill._sum_receipts_from_db(
-                exclude_receipt_pk=exclude_receipt_pk
+                exclude_receipt_pk=exclude_receipt_pk,
             )
             locked_bill.previous_arrears = locked_bill._calculate_previous_arrears_from_db()
             locked_bill.total_amount_due = locked_bill._calculate_total_amount_from_db()
@@ -547,8 +642,10 @@ class StudentBill(models.Model):
             self.payment_status = locked_bill.payment_status
 
             logs_to_create = []
+
             for field_name, old_value in old_values.items():
                 new_value = new_values[field_name]
+
                 if old_value != new_value:
                     logs_to_create.append(
                         StudentBillLog(
@@ -598,6 +695,7 @@ class StudentBill(models.Model):
 
         for field_name, new_value in current_values.items():
             old_value = old_values.get(field_name, "")
+
             if old_value != new_value:
                 logs_to_create.append(
                     StudentBillLog(
@@ -617,15 +715,15 @@ class StudentBill(models.Model):
 
     @property
     def balance_due(self):
-        return (self.previous_arrears + (self.total_amount_due - self.total_paid)).quantize(
-            TWOPLACES, rounding=ROUND_DOWN
-        )
+        return (
+            self.previous_arrears + (self.total_amount_due - self.total_paid)
+        ).quantize(TWOPLACES, rounding=ROUND_DOWN)
 
     @property
     def current_bill_balance(self):
-        return (self.total_amount_due - self.total_paid).quantize(
-            TWOPLACES, rounding=ROUND_DOWN
-        )
+        return (
+            self.total_amount_due - self.total_paid
+        ).quantize(TWOPLACES, rounding=ROUND_DOWN)
 
     @property
     def credit_balance(self):
@@ -679,8 +777,10 @@ class CustomCharge(models.Model):
         if not is_new:
             old_obj = CustomCharge.objects.get(pk=self.pk)
             old_summary = f"{old_obj.charge_name}"
+
             if old_obj.description:
                 old_summary += f" ({old_obj.description})"
+
             old_summary += f": GHS {_decimal_str(old_obj.amount)}"
 
         super().save(*args, **kwargs)
@@ -688,8 +788,10 @@ class CustomCharge(models.Model):
         actor = _actor_or_fallback(self, self.created_by)
 
         new_summary = f"{self.charge_name}"
+
         if self.description:
             new_summary += f" ({self.description})"
+
         new_summary += f": GHS {_decimal_str(self.amount)}"
 
         if is_new:
@@ -720,8 +822,10 @@ class CustomCharge(models.Model):
         actor = _actor_or_fallback(self, self.created_by)
 
         old_summary = f"{self.charge_name}"
+
         if self.description:
             old_summary += f" ({self.description})"
+
         old_summary += f": GHS {_decimal_str(self.amount)}"
 
         super().delete(*args, **kwargs)
@@ -747,7 +851,11 @@ class PaymentReceipt(models.Model):
         on_delete=models.CASCADE,
         related_name="payment_receipts",
     )
-    receipt_number = models.CharField(max_length=50, unique=True, blank=True)
+    receipt_number = models.CharField(
+        max_length=50,
+        unique=True,
+        blank=True,
+    )
     amount_paid = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -774,18 +882,25 @@ class PaymentReceipt(models.Model):
 
     class Meta:
         ordering = ["-payment_date"]
-        indexes = [models.Index(fields=["student_bill"])]
+        indexes = [
+            models.Index(fields=["student_bill"]),
+        ]
 
     def __str__(self):
         return f"Receipt #{self.receipt_number} - GHS {self.amount_paid}"
 
     def _generate_unique_receipt_number(self):
         date_str = timezone.now().strftime("%Y%m%d")
-        bill_ref = self.student_bill.bill_number[-7:] if self.student_bill.bill_number else "UNKNWN"
+        bill_ref = (
+            self.student_bill.bill_number[-7:]
+            if self.student_bill.bill_number
+            else "UNKNWN"
+        )
 
         while True:
             suffix = uuid.uuid4().hex[:6].upper()
             candidate = f"RCT-{date_str}-{bill_ref}-{suffix}"
+
             if not PaymentReceipt.objects.filter(receipt_number=candidate).exists():
                 return candidate
 
@@ -834,7 +949,10 @@ class PaymentReceipt(models.Model):
         )
 
     def delete(self, *args, **kwargs):
-        actor = kwargs.pop("actor", None) or _actor_or_fallback(self, self.created_by)
+        actor = kwargs.pop("actor", None) or _actor_or_fallback(
+            self,
+            self.created_by,
+        )
         skip_bill_recalc = kwargs.pop("skip_bill_recalc", False)
 
         bill = self.student_bill
@@ -871,6 +989,7 @@ class PaymentReceipt(models.Model):
 
         for field_name, new_value in current_values.items():
             old_value = old_values.get(field_name, "")
+
             if old_value != new_value:
                 logs_to_create.append(
                     StudentBillLog(
@@ -890,7 +1009,11 @@ class PaymentReceipt(models.Model):
 
 
 class StudentBillLog(models.Model):
-    bill = models.ForeignKey(StudentBill, on_delete=models.CASCADE, related_name="logs")
+    bill = models.ForeignKey(
+        StudentBill,
+        on_delete=models.CASCADE,
+        related_name="logs",
+    )
     field_name = models.CharField(max_length=100)
     old_value = models.TextField(null=True, blank=True)
     new_value = models.TextField(null=True, blank=True)
@@ -965,7 +1088,11 @@ class PaymentReceiptRequest(models.Model):
         help_text="Image or PDF proof of payment",
     )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
     reviewed_by = models.ForeignKey(
         CustomUser,
         on_delete=models.SET_NULL,
@@ -989,7 +1116,9 @@ class PaymentReceiptRequest(models.Model):
 
     class Meta:
         ordering = ["-submitted_at"]
-        indexes = [models.Index(fields=["submitted_by", "status"])]
+        indexes = [
+            models.Index(fields=["submitted_by", "status"]),
+        ]
 
     def __str__(self):
         return (
@@ -1042,6 +1171,7 @@ class PaymentReceiptRequest(models.Model):
 
             for field_name, new_value in current_values.items():
                 old_value = old_values.get(field_name, "")
+
                 if old_value == new_value:
                     continue
 
@@ -1059,7 +1189,8 @@ class PaymentReceiptRequest(models.Model):
                         action=action,
                         old_status=old_value,
                         new_status=new_value,
-                        comment=self.review_comment or f"Status changed from {old_value} to {new_value}",
+                        comment=self.review_comment
+                        or f"Status changed from {old_value} to {new_value}",
                         actor_first_name=actor.first_name if actor else "",
                         actor_last_name=actor.last_name if actor else "",
                         actor_email=actor.email if actor else "",
@@ -1078,7 +1209,9 @@ class PaymentReceiptRequest(models.Model):
 
     def accept_and_generate_receipt(self, reviewed_by_user):
         with transaction.atomic():
-            locked_self = PaymentReceiptRequest.objects.select_for_update().get(pk=self.pk)
+            locked_self = PaymentReceiptRequest.objects.select_for_update().get(
+                pk=self.pk,
+            )
 
             if locked_self.status == self.STATUS_ACCEPTED:
                 self.status = locked_self.status
@@ -1091,6 +1224,7 @@ class PaymentReceiptRequest(models.Model):
             self.reviewed_at = timezone.now()
 
             notes = f"Auto-generated from payment request. Reference: {self.payment_reference}"
+
             if self.phone_number:
                 notes += f" | Phone: {self.phone_number}"
 
@@ -1104,12 +1238,14 @@ class PaymentReceiptRequest(models.Model):
             receipt._current_user = reviewed_by_user
             receipt.save()
 
-            self.student_bill.refresh_from_db(fields=[
-                "previous_arrears",
-                "total_amount_due",
-                "total_paid",
-                "payment_status",
-            ])
+            self.student_bill.refresh_from_db(
+                fields=[
+                    "previous_arrears",
+                    "total_amount_due",
+                    "total_paid",
+                    "payment_status",
+                ]
+            )
 
             self.status = self.STATUS_ACCEPTED
             self.generated_receipt = receipt
@@ -1122,7 +1258,11 @@ class PaymentReceiptRequest(models.Model):
             return
 
         receipt_to_delete = self.generated_receipt
-        receipt_number = receipt_to_delete.receipt_number if receipt_to_delete else None
+        receipt_number = (
+            receipt_to_delete.receipt_number
+            if receipt_to_delete
+            else None
+        )
 
         with transaction.atomic():
             PaymentReceiptRequest.objects.filter(pk=self.pk).update(
@@ -1141,7 +1281,10 @@ class PaymentReceiptRequest(models.Model):
 
             if receipt_to_delete is not None:
                 receipt_to_delete._current_user = revoked_by_user
-                receipt_to_delete.delete(actor=revoked_by_user, skip_bill_recalc=True)
+                receipt_to_delete.delete(
+                    actor=revoked_by_user,
+                    skip_bill_recalc=True,
+                )
 
             self.student_bill.apply_financial_recalculation(
                 actor=revoked_by_user,
@@ -1149,12 +1292,14 @@ class PaymentReceiptRequest(models.Model):
                 queue_pdf=True,
             )
 
-            self.student_bill.refresh_from_db(fields=[
-                "previous_arrears",
-                "total_amount_due",
-                "total_paid",
-                "payment_status",
-            ])
+            self.student_bill.refresh_from_db(
+                fields=[
+                    "previous_arrears",
+                    "total_amount_due",
+                    "total_paid",
+                    "payment_status",
+                ]
+            )
 
             if receipt_number is not None:
                 PaymentReceiptRequestLog.objects.create(
@@ -1190,9 +1335,18 @@ class PaymentReceiptRequestLog(models.Model):
         on_delete=models.CASCADE,
         related_name="logs",
     )
-    action = models.CharField(max_length=30, choices=ACTION_CHOICES)
-    old_status = models.CharField(max_length=20, blank=True)
-    new_status = models.CharField(max_length=20, blank=True)
+    action = models.CharField(
+        max_length=30,
+        choices=ACTION_CHOICES,
+    )
+    old_status = models.CharField(
+        max_length=20,
+        blank=True,
+    )
+    new_status = models.CharField(
+        max_length=20,
+        blank=True,
+    )
     comment = models.TextField(blank=True)
     actor_first_name = models.CharField(max_length=50)
     actor_last_name = models.CharField(max_length=50)
