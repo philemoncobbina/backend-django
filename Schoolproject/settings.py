@@ -1,130 +1,109 @@
 """
+================================================================================
 Django Settings — Schoolproject
-================================
-Environment : Development (DEBUG=True)
-Django docs : https://docs.djangoproject.com/en/stable/ref/settings/
+================================================================================
+Environment : Development / Production ready
+Docs        : https://docs.djangoproject.com/en/stable/ref/settings/
+================================================================================
 """
 
 # =============================================================================
 # Imports
 # =============================================================================
-
 import os
-from datetime import timedelta
 from pathlib import Path
-
+from datetime import timedelta
 from dotenv import load_dotenv
+import dj_database_url
 
 # =============================================================================
-# Paths
+# Base Directory
 # =============================================================================
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # =============================================================================
 # Environment Variables
 # =============================================================================
+ENV_FILE = BASE_DIR / ".env"
 
-_ENV_PATH = BASE_DIR / ".env"
-
-if _ENV_PATH.exists():
-    _ENCODINGS = ("utf-8", "utf-16", "utf-16le", "utf-16be", "latin1")
-    for _enc in _ENCODINGS:
+if ENV_FILE.exists():
+    for enc in ("utf-8", "utf-16", "utf-16le", "utf-16be", "latin1"):
         try:
-            load_dotenv(_ENV_PATH, encoding=_enc)
+            load_dotenv(ENV_FILE, encoding=enc)
             break
         except UnicodeDecodeError:
             continue
 
+def get_env(key: str, default: str = "", required: bool = False):
+    value = os.getenv(key, default)
+    if required and not value:
+        raise ValueError(f"Missing required environment variable: {key}")
+    return value
+
 # Core
-SECRET_KEY: str = os.getenv("SECRET_KEY", "")
+SECRET_KEY = get_env("SECRET_KEY", required=True)
+DEBUG = get_env("DEBUG", "False") == "True"
 
-# Email / SMS services
-BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
-DEFAULT_FROM_EMAIL: str = os.getenv("DEFAULT_FROM_EMAIL", "")
-BREVO_SMS_SENDER: str = "SchoolFees"
+# Email / SMS
+BREVO_API_KEY = get_env("BREVO_API_KEY", required=True)
+DEFAULT_FROM_EMAIL = get_env("DEFAULT_FROM_EMAIL", required=True)
+BREVO_SMS_SENDER = "SchoolFees"
 
-# Geolocation
-IPINFO_API_KEY: str = os.getenv("IPINFO_API_KEY", "")
+TWILIO_ACCOUNT_SID = get_env("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN  = get_env("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = get_env("TWILIO_PHONE_NUMBER")
 
-# Twilio (supports both naming conventions for backwards compatibility)
-TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID") or os.getenv("account_sid", "")
-TWILIO_AUTH_TOKEN: str  = os.getenv("TWILIO_AUTH_TOKEN") or os.getenv("auth_token", "")
-TWILIO_PHONE_NUMBER: str = os.getenv("TWILIO_PHONE_NUMBER", "")
-
-# Legacy aliases kept for compatibility with older app code
-account_sid = TWILIO_ACCOUNT_SID
-auth_token  = TWILIO_AUTH_TOKEN
-
-# Validate that every required variable is present at startup
-_REQUIRED_ENV_VARS: dict[str, str] = {
-    "SECRET_KEY":         SECRET_KEY,
-    "BREVO_API_KEY":      BREVO_API_KEY,
-    "DEFAULT_FROM_EMAIL": DEFAULT_FROM_EMAIL,
-    "IPINFO_API_KEY":     IPINFO_API_KEY,
-}
-_missing = [key for key, value in _REQUIRED_ENV_VARS.items() if not value]
-if _missing:
-    raise ValueError(
-        f"The following required environment variables are not set: {', '.join(_missing)}"
-    )
+# Geo
+IPINFO_API_KEY = get_env("IPINFO_API_KEY", required=True)
 
 # =============================================================================
-# Core
+# Core Django Settings
 # =============================================================================
-
-DEBUG = os.getenv("DEBUG", "False") == "True"
-
-
+ROOT_URLCONF = "Schoolproject.urls"
 WSGI_APPLICATION = "Schoolproject.wsgi.application"
-ROOT_URLCONF      = "Schoolproject.urls"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 SITE_ID = 1
 
 # =============================================================================
-# Hosts & Origins
+# Hosts & Security
 # =============================================================================
-
-ALLOWED_HOSTS: list[str] = [
+ALLOWED_HOSTS = [
     "api.cobbina.uk",
     "localhost",
     "127.0.0.1",
 ]
 
-CORS_ALLOWED_ORIGINS: list[str] = [
+CSRF_TRUSTED_ORIGINS = [
+    "https://api.cobbina.uk",
     "https://cobbina.uk",
     "https://www.cobbina.uk",
     "https://student.cobbina.uk",
     "https://admin.cobbina.uk",
+    "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
+]
+
+# =============================================================================
+# CORS Configuration
+# =============================================================================
+CORS_ALLOWED_ORIGINS = [
+    "https://cobbina.uk",
+    "https://www.cobbina.uk",
+    "https://student.cobbina.uk",
+    "https://admin.cobbina.uk",
     "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
     "http://localhost:4200",
 ]
 
-CSRF_TRUSTED_ORIGINS: list[str] = [
-    "https://api.cobbina.uk",
-    "https://cobbina.uk",
-    "http://localhost:5174",
-    "http://localhost:5175",
-    "http://localhost:5173",
-    "https://www.cobbina.uk",
-    "https://student.cobbina.uk",
-    "https://admin.cobbina.uk",
-]
-
-CORS_ORIGIN_ALLOW_ALL = False
-
-
-
-CORS_ORIGIN_ALLOW_ALL = False
 CORS_ALLOW_CREDENTIALS = True
 
 # =============================================================================
-# Application Definition
+# Applications
 # =============================================================================
-
-DJANGO_APPS: list[str] = [
+DJANGO_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -134,32 +113,26 @@ DJANGO_APPS: list[str] = [
     "django.contrib.sites",
 ]
 
-THIRD_PARTY_APPS: list[str] = [
-    # REST & Auth
+THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     "rest_framework_simplejwt",
     "rest_framework_social_oauth2",
     "corsheaders",
-    # Allauth (social login)
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
     "allauth.socialaccount.providers.google",
-    # OAuth2
     "oauth2_provider",
     "social_django",
-    # Filters
     "django_filters",
-    # Static files
     "whitenoise.runserver_nostatic",
-    # Celery
     "django_celery_beat",
     "django_celery_results",
 ]
 
-LOCAL_APPS: list[str] = [
-    "authapp.apps.AuthappConfig",
+LOCAL_APPS = [
+    "authapp",
     "admin_auth",
     "student_auth",
     "Schoolapp",
@@ -180,12 +153,11 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # =============================================================================
 # Middleware
 # =============================================================================
-
-MIDDLEWARE: list[str] = [
+MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "authapp.ratelimit_middleware.RateLimitMiddleware",
     "allauth.account.middleware.AccountMiddleware",
@@ -198,11 +170,10 @@ MIDDLEWARE: list[str] = [
 # =============================================================================
 # Templates
 # =============================================================================
-
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [os.path.join(BASE_DIR, "authapp")],
+        "DIRS": [BASE_DIR / "authapp"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -212,15 +183,13 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
             ],
         },
-    },
+    }
 ]
 
 # =============================================================================
 # Database
 # =============================================================================
-import dj_database_url
-
-DATABASES: dict = {
+DATABASES = {
     "default": dj_database_url.config(
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600,
@@ -228,16 +197,15 @@ DATABASES: dict = {
 }
 
 # =============================================================================
-# Authentication & Authorisation
+# Authentication
 # =============================================================================
-
 AUTH_USER_MODEL = "authapp.CustomUser"
 
-AUTHENTICATION_BACKENDS: tuple[str, ...] = (
+AUTHENTICATION_BACKENDS = (
     "django.contrib.auth.backends.ModelBackend",
 )
 
-AUTH_PASSWORD_VALIDATORS: list[dict] = [
+AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
@@ -247,89 +215,89 @@ AUTH_PASSWORD_VALIDATORS: list[dict] = [
 # =============================================================================
 # Django REST Framework
 # =============================================================================
-
-REST_FRAMEWORK: dict = {
+REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.BasicAuthentication",
         "rest_framework.authentication.SessionAuthentication",
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.BasicAuthentication",
         "rest_framework.authentication.TokenAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
 }
 
 # =============================================================================
-# Simple JWT
+# JWT
 # =============================================================================
-
-SIMPLE_JWT: dict = {
-    "ACCESS_TOKEN_LIFETIME":  timedelta(days=1),
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
-    "ALGORITHM":    "HS256",
-    "SIGNING_KEY":  SECRET_KEY,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
     "AUTH_HEADER_TYPES": ("Bearer",),
-}
-
-# =============================================================================
-# Allauth / Social Auth
-# =============================================================================
-
-ACCOUNT_EMAIL_VERIFICATION = "mandatory"
-ACCOUNT_SIGNUP_FIELDS = ["email*", "username*", "password1*", "password2*"]
-
-SOCIALACCOUNT_PROVIDERS: dict = {
-    "google": {
-        "SCOPE": ["profile", "email"],
-        "AUTH_PARAMS": {"access_type": "online"},
-        "OAUTH_PKCE_ENABLED": True,
-    }
 }
 
 # =============================================================================
 # Sessions
 # =============================================================================
-
-SESSION_COOKIE_AGE = 25_200          # 7 hours (in seconds)
+SESSION_COOKIE_AGE = 25200  # 7 hours
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_SAVE_EVERY_REQUEST = True
 
 # =============================================================================
-# Internationalisation
+# Internationalization
 # =============================================================================
-
 LANGUAGE_CODE = "en-us"
-TIME_ZONE     = "UTC"
+TIME_ZONE = "UTC"
 USE_I18N = True
-USE_TZ   = True
+USE_TZ = True
 
 # =============================================================================
-# Static & Media Files
+# Static & Media
 # =============================================================================
-
-STATIC_URL  = "static/"
+STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-MEDIA_URL  = "/media/"
+MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-STORAGES: dict = {
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
     },
 }
 
 # =============================================================================
-# Report Card Settings
+# Celery
 # =============================================================================
+CELERY_BROKER_URL = get_env(
+    "CELERY_BROKER_URL", "redis://localhost:6379/0"
+)
+CELERY_RESULT_BACKEND = get_env(
+    "CELERY_RESULT_BACKEND", "redis://localhost:6379/0"
+)
 
-REPORT_CARD_SETTINGS: dict = {
-    "STORAGE_PATH":     "report_cards/",
-    "SCHOOL_NAME":      "RIDOANA COMPREHENSIVE SCHOOL",
-    "SCHOOL_ADDRESS":   "BT 247 TEMA",
-    "SCHOOL_PHONE":     "+233 24 123 4567",
-    "SCHOOL_EMAIL":     "philemoncobbina19@gmail.com",
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+CELERY_BEAT_SCHEDULE = {
+    "auto-publish-results": {
+        "task": "ResultEntry.tasks.auto_publish_scheduled_results",
+        "schedule": 60.0,
+    }
+}
+
+# =============================================================================
+# Reporting System
+# =============================================================================
+REPORT_CARD_SETTINGS = {
+    "STORAGE_PATH": "report_cards/",
+    "SCHOOL_NAME": "RIDOANA COMPREHENSIVE SCHOOL",
+    "SCHOOL_ADDRESS": "BT 247 TEMA",
+    "SCHOOL_PHONE": "+233 24 123 4567",
+    "SCHOOL_EMAIL": DEFAULT_FROM_EMAIL,
     "SCHOOL_LOGO_PATH": (
         "https://img.freepik.com/free-vector/"
         "gradient-high-school-logo-design_24-9626932.jpg"
@@ -337,78 +305,28 @@ REPORT_CARD_SETTINGS: dict = {
 }
 
 # =============================================================================
-# Celery
-# =============================================================================
-
-CELERY_BROKER_URL    = "redis://localhost:6379/0"
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
-
-CELERY_ACCEPT_CONTENT    = ["json"]
-CELERY_TASK_SERIALIZER   = "json"
-CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE          = "UTC"
-
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
-
-RATELIMIT_IP_META_KEY = 'HTTP_X_FORWARDED_FOR'
-
-# =============================================================================
-# Celery Beat Schedule
-# =============================================================================
-
-# Periodic task: auto-publish scheduled results every 60 seconds
-CELERY_BEAT_SCHEDULE = {
-    'auto-publish-scheduled-results': {
-        'task': 'ResultEntry.tasks.auto_publish_scheduled_results',  
-        'schedule': 60.0,
-    },
-}
-
-# =============================================================================
 # Logging
 # =============================================================================
-
-LOGGING: dict = {
+LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
-            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
-            "style": "{",
-        },
-        "simple": {
             "format": "{levelname} {asctime} {module} {message}",
             "style": "{",
         },
     },
     "handlers": {
-        "file": {
-            "level":     "DEBUG",
-            "class":     "logging.FileHandler",
-            "filename":  BASE_DIR / "debug.log",
-            "formatter": "verbose",
-        },
         "console": {
-            "level":     "INFO",
-            "class":     "logging.StreamHandler",
-            "formatter": "simple",
+            "class": "logging.StreamHandler",
+        },
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": BASE_DIR / "debug.log",
         },
     },
-    "loggers": {
-        "": {
-            "handlers":  ["console", "file"],
-            "level":     "DEBUG",
-            "propagate": True,
-        },
-        "django": {
-            "handlers":  ["console", "file"],
-            "level":     "INFO",
-            "propagate": False,
-        },
-        "authapp": {
-            "handlers":  ["console", "file"],
-            "level":     "DEBUG",
-            "propagate": False,
-        },
+    "root": {
+        "handlers": ["console", "file"],
+        "level": "INFO",
     },
 }

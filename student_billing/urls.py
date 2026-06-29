@@ -21,12 +21,15 @@ urlpatterns = [
     # Students
     path('students/', views.StudentListView.as_view(), name='student-list'),
     
-    # Student Bills (Admin/Staff) - Custom charges are now managed within bills
+    # Student Bills
     path('bills/', views.StudentBillListView.as_view(), name='student-bill-list'),
     path('bills/create/', views.StudentBillCreateView.as_view(), name='student-bill-create'),
     path('bills/<int:pk>/', views.StudentBillDetailView.as_view(), name='student-bill-detail'),
     path('bills/<int:bill_id>/logs/', views.StudentBillLogListView.as_view(), name='student-bill-logs'),
-    
+
+    # ✅ NEW: BULK PUBLISH
+    path('bills/bulk-publish/', views.BulkPublishBillsView.as_view(), name='bulk-publish-bills'),
+
     # Student-Only APIs
     path('my-bills/', views.StudentMyBillsView.as_view(), name='student-my-bills'),
     path('my-bills/current-class/', views.StudentCurrentClassBillsView.as_view(), name='student-current-class-bills'),

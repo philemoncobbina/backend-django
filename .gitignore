@@ -1,39 +1,79 @@
-# Environment files
+# ----------------------------
+# ENVIRONMENT VARIABLES
+# ----------------------------
 .env
+.env.*
+*.env
 
-# Database
+# ----------------------------
+# DJANGO / DATABASE
+# ----------------------------
 db.sqlite3
 *.sqlite3
 
-# Python cache
-*.log
-*.pot
-*.pyc
-*.pyo
+# ----------------------------
+# PYTHON
+# ----------------------------
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
 
-# Virtual environments
+# Logs
+*.log
+
+# ----------------------------
+# VIRTUAL ENVIRONMENTS (CRITICAL FIX)
+# ----------------------------
 venv/
 env/
 env*/
+.venv/
+VIRTUAL-ENVIRONMENT-PATH-HERE/
 
-# Media files (IGNORE ALL MEDIA)
+# Also catch nested ones (important)
+**/venv/
+**/env/
+**/.venv/
+**/site-packages/
+
+# ----------------------------
+# MEDIA & STATIC
+# ----------------------------
 media/
+staticfiles/
 
-# Sensitive files
+# ----------------------------
+# DJANGO SECRET/SENSITIVE
+# ----------------------------
 *.pem
 *.key
-*.bak
-*.swp
+*.crt
 
-# Node modules
+# ----------------------------
+# NODE / FRONTEND
+# ----------------------------
 node_modules/
+dist/
+build/
 
-# IDE files
+# ----------------------------
+# IDE / EDITORS
+# ----------------------------
 .vscode/
 .idea/
 *.iml
 
-# OS files
+# ----------------------------
+# OS FILES
+# ----------------------------
 .DS_Store
 Thumbs.db
+
+# ----------------------------
+# MISC
+# ----------------------------
+*.swp
+*.bak
+*.tmp

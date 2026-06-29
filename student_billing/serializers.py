@@ -1,5 +1,7 @@
 from decimal import Decimal
 import logging
+from django.contrib.auth import get_user_model
+User = get_user_model()
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -633,3 +635,141 @@ class PaymentReceiptRequestReviewSerializer(serializers.ModelSerializer):
             instance.save()
 
         return instance
+    
+
+
+
+
+class BulkPublishBillsSerializer(serializers.Serializer):
+    class_name = serializers.CharField()
+    term = serializers.CharField()
+    academic_year = serializers.CharField()
+
+    def validate(self, data):
+        class_name = data.get("class_name", "").strip()
+        term = data.get("term", "").strip()
+        academic_year = data.get("academic_year", "").strip()
+
+        if not class_name:
+            raise serializers.ValidationError({
+                "class_name": "Class name is required."
+            })
+
+        if not term:
+            raise serializers.ValidationError({
+                "term": "Term is required."
+            })
+
+        if not academic_year:
+            raise serializers.ValidationError({
+                "academic_year": "Academic year is required."
+            })
+
+        templates = BillingTemplate.objects.filter(
+            class_name__iexact=class_name,
+            term=term,
+            academic_year=academic_year,
+        )
+
+        if not templates.exists():
+            raise serializers.ValidationError({
+                "billing_template": (
+                    "No billing template found for the selected class, term, "
+                    "and academic year."
+                )
+            })
+
+        if templates.count() > 1:
+            raise serializers.ValidationError({
+                "billing_template": (
+                    "Multiple billing templates were found for this class, term, "
+                    "and academic year. Please fix duplicate templates before publishing."
+                )
+            })
+
+        billing_template = templates.first()
+
+        students = list(
+            User.objects.filter(
+                role="student",
+                class_name__iexact=class_name,
+            ).order_by("first_name", "last_name")
+        )
+
+        if not students:
+            raise serializers.ValidationError({
+                "students": "No students found in this class."
+            })
+
+        bills = list(
+            StudentBill.objects.filter(
+                billing_template=billing_template,
+                student__in=students,
+            )
+            .select_related("student", "billing_template")
+            .order_by("student__first_name", "student__last_name")
+        )
+
+        billed_student_ids = {bill.student_id for bill in bills}
+
+        missing_students = [
+            {
+                "id": student.id,
+                "name": f"{student.first_name} {student.last_name}",
+                "email": student.email,
+                "class_name": student.class_name,
+            }
+            for student in students
+            if student.id not in billed_student_ids
+        ]
+
+        if missing_students:
+            raise serializers.ValidationError({
+                "missing_bills": {
+                    "message": (
+                        "Bulk publishing cannot continue because some students "
+                        "in this class do not have bills created yet."
+                    ),
+                    "total_missing": len(missing_students),
+                    "students": missing_students,
+                }
+            })
+
+        invalid_status_bills = [
+            {
+                "id": bill.id,
+                "bill_number": bill.bill_number,
+                "student": f"{bill.student.first_name} {bill.student.last_name}",
+                "status": bill.status,
+            }
+            for bill in bills
+            if bill.status not in ["DRAFT", "SCHEDULED", "PUBLISHED"]
+        ]
+
+        if invalid_status_bills:
+            raise serializers.ValidationError({
+                "invalid_status_bills": {
+                    "message": (
+                        "Some bills have statuses that cannot be bulk published."
+                    ),
+                    "bills": invalid_status_bills,
+                }
+            })
+
+        publishable_bills = [
+            bill for bill in bills
+            if bill.status in ["DRAFT", "SCHEDULED"]
+        ]
+
+        already_published_bills = [
+            bill for bill in bills
+            if bill.status == "PUBLISHED"
+        ]
+
+        data["billing_template"] = billing_template
+        data["students"] = students
+        data["bills"] = bills
+        data["publishable_bills"] = publishable_bills
+        data["already_published_bills"] = already_published_bills
+
+        return data

@@ -45,6 +45,7 @@ from .serializers import (
     PaymentReceiptRequestCreateSerializer,
     PaymentReceiptRequestReviewSerializer,
     PaymentReceiptRequestLogSerializer,
+    BulkPublishBillsSerializer,
     StudentBillLogSerializer as BillLogSerializer,
 )
 
@@ -787,70 +788,119 @@ class PublishBillView(APIView):
 # ===========================================================================
 
 class BulkPublishBillsView(APIView):
+    """
+    Publishes all bills for a specific class + term + academic year.
+
+    Rules:
+    - Every student in the selected class must already have a bill.
+    - If any student has no bill, publishing is blocked completely.
+    - Only DRAFT and SCHEDULED bills are changed to PUBLISHED.
+    - Already PUBLISHED bills are skipped and reported.
+    - PDF generation, email, and SMS notifications are queued after publish.
+    """
+
     permission_classes = [StaffOrAdminPermission]
 
     def post(self, request):
-        bill_ids = request.data.get("bill_ids", [])
+        serializer = BulkPublishBillsSerializer(
+            data=request.data,
+            context={"request": request},
+        )
 
-        if not bill_ids:
+        if not serializer.is_valid():
             return Response(
-                {"success": False, "message": "No bill IDs provided"},
+                {
+                    "success": False,
+                    "message": "Bulk publishing failed validation.",
+                    "errors": serializer.errors,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        billing_template = serializer.validated_data["billing_template"]
+        students = serializer.validated_data["students"]
+        publishable_bills = serializer.validated_data["publishable_bills"]
+        already_published_bills = serializer.validated_data["already_published_bills"]
+
         published_bills = []
-        failed_bills = []
 
-        for bill_id in bill_ids:
-            try:
-                bill = StudentBill.objects.get(id=bill_id)
+        with transaction.atomic():
+            bill_ids = [bill.id for bill in publishable_bills]
 
-                if bill.status in ["DRAFT", "SCHEDULED"]:
-                    bill.status = "PUBLISHED"
-                    bill._current_user = request.user
-                    bill.save(update_fields=["status"])
+            bills_to_publish = (
+                StudentBill.objects
+                .select_for_update()
+                .filter(id__in=bill_ids)
+                .select_related("student", "billing_template")
+            )
 
-                    generate_bill_pdf_task.delay(bill.pk)
-                    send_bill_published_email_task.delay(bill.pk)
-                    send_bill_published_sms_task.delay(bill.pk)
+            for bill in bills_to_publish:
+                if bill.status not in ["DRAFT", "SCHEDULED"]:
+                    continue
 
-                    published_bills.append({
-                        "id": bill.id,
-                        "bill_number": bill.bill_number,
-                        "pdf_queued": True,
-                        "notifications_queued": True,
-                    })
+                bill.status = "PUBLISHED"
+                bill._current_user = request.user
 
-                elif bill.status == "PUBLISHED":
-                    failed_bills.append({
-                        "id": bill.id,
-                        "bill_number": bill.bill_number,
-                        "reason": "Bill is already published",
-                    })
-                else:
-                    failed_bills.append({
-                        "id": bill.id,
-                        "bill_number": bill.bill_number,
-                        "reason": f"Cannot publish bill with status: {bill.status}",
-                    })
+                update_fields = ["status"]
 
-            except StudentBill.DoesNotExist:
-                failed_bills.append({"id": bill_id, "reason": "Bill not found"})
-            except Exception as e:
-                failed_bills.append({"id": bill_id, "reason": str(e)})
+                if hasattr(bill, "published_at") and not bill.published_at:
+                    bill.published_at = timezone.now()
+                    update_fields.append("published_at")
+
+                bill.save(update_fields=update_fields)
+
+                transaction.on_commit(
+                    lambda pk=bill.pk: generate_bill_pdf_task.delay(pk)
+                )
+                transaction.on_commit(
+                    lambda pk=bill.pk: send_bill_published_email_task.delay(pk)
+                )
+                transaction.on_commit(
+                    lambda pk=bill.pk: send_bill_published_sms_task.delay(pk)
+                )
+
+                published_bills.append({
+                    "id": bill.id,
+                    "bill_number": bill.bill_number,
+                    "student": f"{bill.student.first_name} {bill.student.last_name}",
+                    "status": bill.status,
+                    "pdf_queued": True,
+                    "notifications_queued": True,
+                })
+
+        already_published_data = [
+            {
+                "id": bill.id,
+                "bill_number": bill.bill_number,
+                "student": f"{bill.student.first_name} {bill.student.last_name}",
+                "status": bill.status,
+            }
+            for bill in already_published_bills
+        ]
 
         return Response(
             {
                 "success": True,
                 "message": (
-                    f"Successfully published {len(published_bills)} bills. "
-                    "PDFs are being generated and notifications are being sent in the background."
+                    f"Bulk publish completed for "
+                    f"{billing_template.class_name} - "
+                    f"{billing_template.get_term_display()} "
+                    f"({billing_template.academic_year}). "
+                    f"{len(published_bills)} bill(s) published."
                 ),
+                "class_name": billing_template.class_name,
+                "term": billing_template.term,
+                "term_display": billing_template.get_term_display(),
+                "academic_year": billing_template.academic_year,
+                "total_students_in_class": len(students),
+                "total_bills_checked": len(serializer.validated_data["bills"]),
+                "published_count": len(published_bills),
+                "already_published_count": len(already_published_data),
                 "published_bills": published_bills,
-                "failed_bills": failed_bills,
-            }
+                "already_published_bills": already_published_data,
+            },
+            status=status.HTTP_200_OK,
         )
-
 
 # ===========================================================================
 # STUDENT BILL LOGS
