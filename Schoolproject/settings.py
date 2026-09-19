@@ -141,6 +141,7 @@ LOCAL_APPS = [
     "jobapplication",
     "jobposting",
     "Subscriptions",
+    "attendance",
     "Reservationapp",
     "student_billing",
     "booklist",
@@ -194,6 +195,30 @@ DATABASES = {
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600,
     )
+}
+
+# =============================================================================
+# Cache (Redis)
+# =============================================================================
+# Backs the caching added in attendance/cache_utils.py and
+# ResultsEntry/cache_utils.py (roster, calendar, summary, attendance
+# stats, class size, class-course lookups, etc).
+#
+# Deliberately a DIFFERENT Redis DB index (1) than CELERY_BROKER_URL /
+# CELERY_RESULT_BACKEND below (0), so cache traffic and Celery's
+# queue/result data can't collide or get flushed together.
+#
+# Requires Django 4.0+ for the built-in RedisCache backend below (no
+# extra package needed). If this project is on an older Django version,
+# tell me and I'll swap this for the django-redis package instead
+# ("django_redis.cache.RedisCache" + `pip install django-redis`).
+CACHE_URL = get_env("CACHE_URL", "redis://localhost:6379/1")
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": CACHE_URL,
+    }
 }
 
 # =============================================================================
@@ -332,4 +357,13 @@ LOGGING = {
 }
 
 
-RATELIMIT_IP_META_KEY = "HTTP_X_FORWARDED_FOR"
+# =============================================================================
+# Rate Limiting
+# =============================================================================
+
+if DEBUG:
+    RATELIMIT_IP_META_KEY = "REMOTE_ADDR"
+else:
+    RATELIMIT_IP_META_KEY = "HTTP_X_FORWARDED_FOR"
+EMAIL_VERIFICATION_TOKEN_MINUTES = 2
+FRONTEND_LOGIN_URL = "https://plvcmonline.uk/login"

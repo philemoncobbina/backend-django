@@ -1,68 +1,46 @@
-# admin_auth/views.py
-from rest_framework import generics, permissions, status
-import requests
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from django.contrib.auth import authenticate, login, logout
-from django.contrib.auth import get_user_model
-from django.contrib.auth import authenticate, login
-from django.core.mail import send_mail
-from django.urls import reverse
-from django.conf import settings
-from rest_framework_simplejwt.tokens import RefreshToken
-import jwt
 import logging
-from django.shortcuts import get_object_or_404, redirect
-import os
-from django.template.loader import render_to_string
-from django.core.mail import EmailMultiAlternatives
+
+import jwt
+from django.apps import apps
+from django.conf import settings
+from django.contrib.auth import get_user_model, login, logout
 from django.contrib.auth.hashers import check_password
-from django.utils.crypto import get_random_string
-from django.contrib.auth.hashers import make_password
-from rest_framework.permissions import IsAuthenticated, AllowAny
-import base64
-from sib_api_v3_sdk import Configuration, ApiClient, SendSmtpEmail
-from sib_api_v3_sdk.api.transactional_emails_api import TransactionalEmailsApi
-from sib_api_v3_sdk.rest import ApiException
-from django.template.loader import render_to_string
+from django.db import transaction
+from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
+from django.utils import timezone
 from rest_framework import generics, permissions, status
-from rest_framework.response import Response
-from authapp.models import CustomUser
-from .serializers import AdminUserSerializer
-from django.core.exceptions import ObjectDoesNotExist
-from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-import logging
-from django.utils import timezone
 from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
+from sib_api_v3_sdk import ApiClient, Configuration, SendSmtpEmail
+from sib_api_v3_sdk.api.transactional_emails_api import (
+    TransactionalEmailsApi,
+)
+from sib_api_v3_sdk.rest import ApiException
+
 from authapp.models import CustomUser
-from datetime import datetime
-from django.apps import apps
-from django.utils import timezone
+
+from .models import UserChangeLog
 from .permissions import IsPrincipalOrSuperuser
+from .serializers import (
+    AdminUserSerializer,
+    UserChangeLogSerializer,
+    create_user_change_log,
+)
+
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Shared rate-limit helper
-# ---------------------------------------------------------------------------
-
 def _rate_limited_response():
-    """Return a standard 429 response when a rate limit is exceeded."""
     return Response(
-        {'error': 'Too many requests. Please try again later.'},
-        status=status.HTTP_429_TOO_MANY_REQUESTS
+        {"error": "Too many requests. Please try again later."},
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
     )
 
-
-# ---------------------------------------------------------------------------
-# Views
-# ---------------------------------------------------------------------------
 
 class UserDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -74,9 +52,14 @@ class UserDetailView(generics.RetrieveAPIView):
     def get(self, request, *args, **kwargs):
         user = self.get_object()
         serializer = self.get_serializer(user)
-        user_data = serializer.data
-        user_data['role'] = user.role
-        return Response(user_data)
+
+        user_data = dict(serializer.data)
+        user_data["role"] = user.role
+
+        return Response(
+            user_data,
+            status=status.HTTP_200_OK,
+        )
 
 
 class SessionCheckView(APIView):
@@ -84,294 +67,544 @@ class SessionCheckView(APIView):
 
     def get(self, request, *args, **kwargs):
         user = request.user
-        response = Response({
-            'authenticated': True,
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'role': user.role,
-            }
-        })
-        response['Cache-Control'] = 'private, max-age=300'
+
+        response = Response(
+            {
+                "authenticated": True,
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "role": user.role,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+        response["Cache-Control"] = "private, max-age=300"
+
         return response
 
 
 class AdminUserManagementView(APIView):
     permission_classes = [IsPrincipalOrSuperuser]
 
-    # ── Guardian e-mail conflict check ────────────────────────────────────
-
-    @staticmethod
-    def _validate_guardian_emails(student_email, guardians_data):
-        """
-        Return a Response(400) if any guardian in *guardians_data* carries the
-        same e-mail as the student, otherwise return None.
-
-        This is an explicit early-exit guard that runs *before* the serializer
-        so the caller gets a clear, human-readable error message rather than a
-        cryptic model-level ValidationError.
-
-        Parameters
-        ----------
-        student_email : str | None
-            The e-mail that will be recorded for the student after the update.
-        guardians_data : list[dict] | None
-            The raw guardian dicts from the request payload, or None when the
-            key was omitted entirely (PATCH without guardians).
-        """
-        if not student_email or not guardians_data:
-            return None
-
-        conflicting = [
-            gd.get('email', '')
-            for gd in guardians_data
-            if gd.get('email', '').strip().lower() == student_email.strip().lower()
-        ]
-
-        if conflicting:
-            return Response(
-                {
-                    'error': (
-                        "A guardian's email cannot be the same as the student's "
-                        f"email ({student_email}). Please use a different email "
-                        "address for the guardian."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return None
-
-    @staticmethod
-    def _validate_student_email_vs_existing_guardians(user, new_email):
-        """
-        Return a Response(400) if changing the student's e-mail to *new_email*
-        would create a conflict with any guardian already saved on that user,
-        otherwise return None.
-
-        This prevents a subtle edge-case: an admin changes the student's e-mail
-        to a value that is already stored as a guardian's e-mail without touching
-        the guardians list at all.
-        """
-        conflicting = list(
-            user.guardians
-            .filter(email__iexact=new_email.strip())
-            .values_list('email', flat=True)
+    def _can_modify_users(self, request):
+        return (
+            request.user.is_superuser
+            or request.user.role == "principal"
         )
-
-        if conflicting:
-            return Response(
-                {
-                    'error': (
-                        f"The new student email ({new_email}) conflicts with an "
-                        "existing guardian email on this account. Update or remove "
-                        "the guardian's email first."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return None
-
-    # ── HTTP verbs ─────────────────────────────────────────────────────────
 
     def get(self, request, *args, **kwargs):
-        """GET — accessible by staff (read-only), principals, and superusers."""
-        users = CustomUser.objects.all()
-        serializer = AdminUserSerializer(users, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        """
+        Return all users.
 
+        Access is controlled by IsPrincipalOrSuperuser.
+        """
+        users = (
+            CustomUser.objects
+            .prefetch_related("guardians")
+            .all()
+        )
+
+        serializer = AdminUserSerializer(
+            users,
+            many=True,
+            context={"request": request},
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+    @transaction.atomic
     def patch(self, request, user_id, *args, **kwargs):
-        """PATCH — only principals and superusers."""
-        if not (request.user.is_superuser or request.user.role == 'principal'):
+        if not self._can_modify_users(request):
             logger.warning(
-                f"Unauthorized PATCH attempt by user {request.user.email} "
-                f"with role {request.user.role}"
+                "Unauthorized PATCH attempt by %s with role %s",
+                request.user.email,
+                request.user.role,
             )
             return Response(
-                {'error': 'Permission denied. Only principals can modify users.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    "error": (
+                        "Permission denied. Only principals or superusers "
+                        "can modify users."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         try:
-            user = CustomUser.objects.get(id=user_id)
-            logger.info(f"Found user with ID {user_id}: {user.email}")
+            user = (
+                CustomUser.objects
+                .select_for_update()
+                .get(id=user_id)
+            )
         except CustomUser.DoesNotExist:
-            logger.error(f"User with ID {user_id} not found")
-            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            logger.warning(
+                "User with ID %s was not found for update",
+                user_id,
+            )
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        action = request.data.get('action')
-        logger.debug(
-            f"Processing action: {action} for user {user.email} by {request.user.email}"
-        )
+        action = request.data.get("action")
 
-        if action == 'block':
+        if action == "block":
+            if user.is_blocked and not user.is_active:
+                return Response(
+                    {
+                        "message": (
+                            f"User {user.email} is already blocked."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            previous_value = {
+                "is_blocked": user.is_blocked,
+                "is_active": user.is_active,
+            }
+
             user.is_blocked = True
             user.is_active = False
-            user.save()
-            logger.info(f"User {user.email} blocked successfully by {request.user.email}")
-            return Response(
-                {'message': f'User {user.email} has been blocked.'},
-                status=status.HTTP_200_OK
+            user.save(
+                update_fields=[
+                    "is_blocked",
+                    "is_active",
+                ]
             )
 
-        elif action == 'unblock':
+            create_user_change_log(
+                target_user=user,
+                changed_by=request.user,
+                action=UserChangeLog.Action.BLOCK,
+                field_name="account_status",
+                previous_value=previous_value,
+                new_value={
+                    "is_blocked": True,
+                    "is_active": False,
+                },
+                request=request,
+            )
+
+            logger.info(
+                "User %s blocked by %s",
+                user.email,
+                request.user.email,
+            )
+
+            return Response(
+                {
+                    "message": (
+                        f"User {user.email} has been blocked."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if action == "unblock":
+            if not user.is_blocked and user.is_active:
+                return Response(
+                    {
+                        "message": (
+                            f"User {user.email} is already unblocked."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            previous_value = {
+                "is_blocked": user.is_blocked,
+                "is_active": user.is_active,
+            }
+
             user.is_blocked = False
             user.is_active = True
-            user.save()
-            logger.info(f"User {user.email} unblocked successfully by {request.user.email}")
-            return Response(
-                {'message': f'User {user.email} has been unblocked.'},
-                status=status.HTTP_200_OK
+            user.save(
+                update_fields=[
+                    "is_blocked",
+                    "is_active",
+                ]
             )
 
-        elif action == 'edit':
-            old_class = user.class_name
-            new_class = request.data.get('class_name')
-
-            # ── Guardian e-mail validation (view-level guard) ──────────────
-            #
-            # Resolve the student e-mail that will be in effect after the save:
-            #   • Use the incoming value when the payload includes 'email'.
-            #   • Fall back to the current persisted value otherwise.
-            incoming_student_email = request.data.get('email') or user.email
-            guardians_data = request.data.get('guardians')  # may be None or a list
-
-            # 1. New/updated guardian list vs student e-mail.
-            conflict_response = self._validate_guardian_emails(
-                incoming_student_email, guardians_data
+            create_user_change_log(
+                target_user=user,
+                changed_by=request.user,
+                action=UserChangeLog.Action.UNBLOCK,
+                field_name="account_status",
+                previous_value=previous_value,
+                new_value={
+                    "is_blocked": False,
+                    "is_active": True,
+                },
+                request=request,
             )
-            if conflict_response:
-                logger.warning(
-                    f"Guardian e-mail conflict detected for student {user.email} "
-                    f"by {request.user.email}"
-                )
-                return conflict_response
 
-            # 2. Changing the student's e-mail vs already-saved guardian e-mails.
-            if 'email' in request.data and request.data['email'] != user.email:
-                conflict_response = self._validate_student_email_vs_existing_guardians(
-                    user, incoming_student_email
-                )
-                if conflict_response:
-                    logger.warning(
-                        f"New student email {incoming_student_email} conflicts with "
-                        f"an existing guardian email for user {user.email} "
-                        f"(requested by {request.user.email})"
-                    )
-                    return conflict_response
-
-            # ── Build a clean mutable copy of the request payload ──────────
-            # QueryDict.copy() gives us a mutable version; if the client sends
-            # JSON (the common case with DRF), request.data is already a plain
-            # dict so we just use it directly.
-            if hasattr(request.data, 'copy'):
-                mutable_data = request.data.copy()
-            else:
-                mutable_data = dict(request.data)
-
-            serializer = AdminUserSerializer(user, data=mutable_data, partial=True)
-
-            if serializer.is_valid():
-                serializer.save()
-
-                if new_class and new_class != old_class and user.is_student:
-                    logger.info(
-                        f"Detected class change for student {user.email}: "
-                        f"{old_class} -> {new_class}"
-                    )
-                    self._handle_class_change(user, old_class, new_class)
-
-                logger.info(
-                    f"User {user.email} details updated successfully by {request.user.email}"
-                )
-                return Response(
-                    {'message': 'User details updated successfully.'},
-                    status=status.HTTP_200_OK
-                )
-
-            logger.error(f"Validation errors for user {user.email}: {serializer.errors}")
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        elif action == 'activate':
-            user.is_active = True
-            user.save()
             logger.info(
-                f"User {user.email} activated successfully by {request.user.email}"
+                "User %s unblocked by %s",
+                user.email,
+                request.user.email,
             )
+
             return Response(
-                {'message': f'User {user.email} has been activated.'},
-                status=status.HTTP_200_OK
+                {
+                    "message": (
+                        f"User {user.email} has been unblocked."
+                    )
+                },
+                status=status.HTTP_200_OK,
             )
 
-        logger.warning(f"Unknown action received: {action} by {request.user.email}")
-        return Response({'error': 'Invalid action.'}, status=status.HTTP_400_BAD_REQUEST)
+        if action == "activate":
+            if user.is_active:
+                return Response(
+                    {
+                        "message": (
+                            f"User {user.email} is already active."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+            previous_value = user.is_active
+            user.is_active = True
+            user.save(update_fields=["is_active"])
+
+            create_user_change_log(
+                target_user=user,
+                changed_by=request.user,
+                action=UserChangeLog.Action.ACTIVATE,
+                field_name="is_active",
+                previous_value=previous_value,
+                new_value=True,
+                request=request,
+            )
+
+            logger.info(
+                "User %s activated by %s",
+                user.email,
+                request.user.email,
+            )
+
+            return Response(
+                {
+                    "message": (
+                        f"User {user.email} has been activated."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if action == "deactivate":
+            if not user.is_active:
+                return Response(
+                    {
+                        "message": (
+                            f"User {user.email} is already inactive."
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            if user.pk == request.user.pk:
+                return Response(
+                    {
+                        "error": (
+                            "You cannot deactivate your own account through "
+                            "this administrative endpoint."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            previous_value = user.is_active
+            user.is_active = False
+            user.save(update_fields=["is_active"])
+
+            create_user_change_log(
+                target_user=user,
+                changed_by=request.user,
+                action=UserChangeLog.Action.DEACTIVATE,
+                field_name="is_active",
+                previous_value=previous_value,
+                new_value=False,
+                request=request,
+            )
+
+            logger.info(
+                "User %s deactivated by %s",
+                user.email,
+                request.user.email,
+            )
+
+            return Response(
+                {
+                    "message": (
+                        f"User {user.email} has been deactivated."
+                    )
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if action == "edit":
+            old_class = user.class_name
+
+            mutable_data = request.data.copy()
+            mutable_data.pop("action", None)
+
+            serializer = AdminUserSerializer(
+                user,
+                data=mutable_data,
+                partial=True,
+                context={"request": request},
+            )
+            serializer.is_valid(raise_exception=True)
+            updated_user = serializer.save()
+
+            new_class = updated_user.class_name
+
+            if (
+                new_class
+                and new_class != old_class
+                and updated_user.is_student
+            ):
+                self._handle_class_change(
+                    updated_user,
+                    old_class,
+                    new_class,
+                )
+
+            logger.info(
+                "User %s updated by %s",
+                updated_user.email,
+                request.user.email,
+            )
+
+            response_serializer = AdminUserSerializer(
+                updated_user,
+                context={"request": request},
+            )
+
+            return Response(
+                {
+                    "message": "User details updated successfully.",
+                    "user": response_serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        logger.warning(
+            "Unknown user-management action '%s' submitted by %s",
+            action,
+            request.user.email,
+        )
+
+        return Response(
+            {
+                "error": (
+                    "Invalid action. Supported actions are block, unblock, "
+                    "activate, deactivate, and edit."
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     def _handle_class_change(self, user, old_class, new_class):
-        """Handle the class change for a student and save ALL historical changes."""
-        try:
-            StudentClassHistory = apps.get_model('booklist', 'StudentClassHistory')
-            current_year = self._get_current_academic_year(user)
-            logger.debug(f"Current academic year: {current_year}")
+        """
+        Persist the previous class when a student's class changes.
+        """
+        StudentClassHistory = apps.get_model(
+            "booklist",
+            "StudentClassHistory",
+        )
+        current_year = self._get_current_academic_year(user)
 
-            if old_class != new_class:
-                logger.info(
-                    f"Recording class change for {user.email}: {old_class} → {new_class}"
-                )
-                StudentClassHistory.objects.create(
-                    student=user,
-                    academic_year=current_year,
-                    class_name=old_class
-                )
-                logger.info(f"New class history entry created for {user.email}")
-            else:
-                logger.debug("No actual class change detected, skipping history update")
+        if old_class != new_class:
+            StudentClassHistory.objects.create(
+                student=user,
+                academic_year=current_year,
+                class_name=old_class or "",
+            )
 
-        except Exception as e:
-            logger.error(f"Error updating class history for {user.email}: {str(e)}")
-            raise
+            logger.info(
+                "Class history recorded for %s: %s to %s",
+                user.email,
+                old_class,
+                new_class,
+            )
 
     def _get_current_academic_year(self, user):
-        """Helper to get current academic year string from user's history or use default."""
-        try:
-            latest_history = user.class_history.order_by('-created_at').first()
-            if latest_history:
-                return latest_history.academic_year
-            current_year = datetime.now().year
-            return f"{current_year}-{current_year + 1}"
-        except Exception as e:
-            logger.error(f"Error getting current academic year: {str(e)}")
-            current_year = datetime.now().year
-            return f"{current_year}-{current_year + 1}"
+        # StudentClassHistory has no `created_at` field (its columns are
+        # only academic_year, class_name, id, student), so ordering by
+        # "-created_at" raises a FieldError. `id` is auto-incrementing, so
+        # ordering by "-id" gives us the most recently created record
+        # instead. If a `created_at` field is added to that model later,
+        # switch this back to "-created_at" for true chronological order.
+        latest_history = (
+            user.class_history
+            .order_by("-id")
+            .first()
+        )
 
+        if latest_history:
+            return latest_history.academic_year
+
+        current_year = timezone.now().year
+        return f"{current_year}-{current_year + 1}"
+
+    @transaction.atomic
     def delete(self, request, user_id, *args, **kwargs):
-        """DELETE — only principals and superusers."""
-        if not (request.user.is_superuser or request.user.role == 'principal'):
+        if not self._can_modify_users(request):
             logger.warning(
-                f"Unauthorized DELETE attempt by user {request.user.email} "
-                f"with role {request.user.role}"
+                "Unauthorized DELETE attempt by %s with role %s",
+                request.user.email,
+                request.user.role,
             )
             return Response(
-                {'error': 'Permission denied. Only principals can delete users.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    "error": (
+                        "Permission denied. Only principals or superusers "
+                        "can delete users."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         try:
-            user = CustomUser.objects.get(id=user_id)
-            logger.info(f"Found user to delete: {user.email}")
+            user = (
+                CustomUser.objects
+                .select_for_update()
+                .get(id=user_id)
+            )
         except CustomUser.DoesNotExist:
-            logger.error(f"User with ID {user_id} not found for deletion")
-            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        email = user.email
-        user.delete()
-        logger.info(f"User {email} deleted successfully by {request.user.email}")
-        return Response(
-            {'message': f'User {email} has been deleted successfully.'},
-            status=status.HTTP_200_OK
+        if user.pk == request.user.pk:
+            return Response(
+                {
+                    "error": (
+                        "You cannot delete your own account through this "
+                        "administrative endpoint."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_email = user.email
+
+        user_snapshot = {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "role": user.role,
+            "index_number": user.index_number,
+            "class_name": user.class_name,
+            "is_active": user.is_active,
+            "is_blocked": user.is_blocked,
+        }
+
+        create_user_change_log(
+            target_user=user,
+            target_user_email=user_email,
+            changed_by=request.user,
+            action=UserChangeLog.Action.DELETE,
+            field_name="account",
+            previous_value=user_snapshot,
+            new_value=None,
+            request=request,
         )
+
+        user.delete()
+
+        logger.info(
+            "User %s deleted by %s",
+            user_email,
+            request.user.email,
+        )
+
+        return Response(
+            {
+                "message": (
+                    f"User {user_email} has been deleted successfully."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class UserChangeLogListView(generics.ListAPIView):
+    """
+    Read-only endpoint for viewing user and guardian audit logs.
+
+    Only principals and superusers can access this endpoint.
+
+    Optional query parameters:
+        target_user_email
+        changed_by_email
+        action
+        field_name
+    """
+
+    permission_classes = [IsPrincipalOrSuperuser]
+    serializer_class = UserChangeLogSerializer
+    http_method_names = ["get", "head", "options"]
+
+    def get_queryset(self):
+        queryset = (
+            UserChangeLog.objects
+            .select_related(
+                "target_user",
+                "changed_by",
+            )
+            .all()
+        )
+
+        target_user_email = self.request.query_params.get(
+            "target_user_email"
+        )
+        changed_by_email = self.request.query_params.get(
+            "changed_by_email"
+        )
+        action = self.request.query_params.get("action")
+        field_name = self.request.query_params.get("field_name")
+
+        if target_user_email:
+            queryset = queryset.filter(
+                target_user_email__iexact=target_user_email.strip()
+            )
+
+        if changed_by_email:
+            queryset = queryset.filter(
+                changed_by_email__iexact=changed_by_email.strip()
+            )
+
+        if action:
+            normalised_action = action.strip().lower()
+
+            valid_actions = {
+                choice.value
+                for choice in UserChangeLog.Action
+            }
+
+            if normalised_action in valid_actions:
+                queryset = queryset.filter(action=normalised_action)
+            else:
+                queryset = queryset.none()
+
+        if field_name:
+            queryset = queryset.filter(
+                field_name__icontains=field_name.strip()
+            )
+
+        return queryset
 
 
 class AdminSignUpView(generics.CreateAPIView):
@@ -379,202 +612,300 @@ class AdminSignUpView(generics.CreateAPIView):
     serializer_class = AdminUserSerializer
 
     def create(self, request, *args, **kwargs):
-        if getattr(request, 'limited', False):
+        if getattr(request, "limited", False):
             return _rate_limited_response()
 
-        if not (request.user.is_superuser or request.user.role == 'principal'):
+        if not (
+            request.user.is_superuser
+            or request.user.role == "principal"
+        ):
             return Response(
-                {'error': 'Only principals or superusers can create users.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    "error": (
+                        "Only principals or superusers can create users."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         mutable_data = request.data.copy()
-        email = mutable_data.get('email')
-        role = mutable_data.get('role', 'staff')
+        email = mutable_data.get("email")
+        role = mutable_data.get("role", "staff")
 
-        if role not in ['staff', 'principal']:
+        if role not in ["staff", "principal"]:
             return Response(
-                {'error': 'Invalid role provided.'},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid role provided."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if CustomUser.objects.filter(email=email).exists():
+        if not email:
             return Response(
-                {'error': 'Email has already been used.'},
-                status=status.HTTP_400_BAD_REQUEST
+                {"email": ["This field is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = self.get_serializer(data=mutable_data)
+        normalised_email = email.strip()
+
+        if CustomUser.objects.filter(
+            email__iexact=normalised_email
+        ).exists():
+            return Response(
+                {"error": "Email has already been used."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        mutable_data["email"] = normalised_email
+
+        serializer = self.get_serializer(
+            data=mutable_data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-
-        try:
-            user = CustomUser.objects.get(email=email)
-        except ObjectDoesNotExist:
-            return Response(
-                {'error': 'User creation failed.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        user = serializer.save()
 
         self.send_verification_email(user)
 
         headers = self.get_success_headers(serializer.data)
+
         return Response(
-            {'message': 'User registration successful. Please check your email for the verification link.'},
+            {
+                "message": (
+                    "User registration successful. Please check the email "
+                    "address for the verification link."
+                )
+            },
             status=status.HTTP_201_CREATED,
-            headers=headers
+            headers=headers,
         )
 
     def send_verification_email(self, user):
         verification_token = RefreshToken.for_user(user).access_token
 
         verification_url = reverse(
-            'admin_auth:verify-email', kwargs={'token': str(verification_token)}
+            "admin_auth:verify-email",
+            kwargs={"token": str(verification_token)},
         )
-        verification_url = self.request.build_absolute_uri(verification_url)
+        verification_url = self.request.build_absolute_uri(
+            verification_url
+        )
 
         email_body = f"""
         <html>
         <body style="font-family: Arial, sans-serif; color: #333;">
-            Dear {user.first_name},
-            <h2 style="color: #4CAF50;">Welcome to Our Service!</h2>
-            <p>Thank you for registering with us. Please click the button below to verify your email address:</p>
+            <p>Dear {user.first_name},</p>
 
-            <a href="{verification_url}" style="display: inline-block; padding: 10px 20px;
-               background-color: #4CAF50; color: #fff; text-decoration: none;
-               border-radius: 5px; font-weight: bold;">
-                Verify Your Email
-            </a>
+            <h2 style="color: #4CAF50;">
+                Welcome to Our Service!
+            </h2>
 
-            <p>If you did not register for this account, please ignore this email.</p>
+            <p>
+                Thank you for registering with us. Please click the button
+                below to verify your email address:
+            </p>
+
+            <p>
+                {verification_url}
+                    Verify Your Email
+                </a>
+            </p>
+
+            <p>
+                If you did not register for this account, please ignore this
+                email.
+            </p>
 
             <br>
-            <p>Best regards,<br>Your Company Team</p>
+
+            <p>
+                Best regards,<br>
+                Your Company Team
+            </p>
         </body>
         </html>
         """
 
         configuration = Configuration()
-        configuration.api_key['api-key'] = settings.BREVO_API_KEY
+        configuration.api_key["api-key"] = settings.BREVO_API_KEY
 
-        api_instance = TransactionalEmailsApi(ApiClient(configuration))
+        api_instance = TransactionalEmailsApi(
+            ApiClient(configuration)
+        )
 
         send_smtp_email = SendSmtpEmail(
             to=[{"email": user.email}],
-            sender={"name": "Your Company", "email": settings.DEFAULT_FROM_EMAIL},
+            sender={
+                "name": "Your Company",
+                "email": settings.DEFAULT_FROM_EMAIL,
+            },
             subject="Verify Your Email",
-            html_content=email_body
+            html_content=email_body,
         )
 
         try:
-            api_response = api_instance.send_transac_email(send_smtp_email)
-            logger.info(f"Verification email sent to {user.email}: {api_response}")
-        except ApiException as e:
-            logger.error(f"Exception when sending email: {e}")
+            response = api_instance.send_transac_email(
+                send_smtp_email
+            )
+            logger.info(
+                "Verification email sent to %s: %s",
+                user.email,
+                response,
+            )
+        except ApiException:
+            logger.exception(
+                "Failed to send verification email to %s",
+                user.email,
+            )
 
 
 class VerifyEmailView(APIView):
-    """
-    IDOR FIX: user_id removed from URL — identity comes from inside the token only.
-
-    URL change required in urls.py:
-        OLD: path('verify-email/<int:user_id>/<str:token>/', ...)
-        NEW: path('verify-email/<str:token>/',               ...)
-    """
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request, token):
-        if getattr(request, 'limited', False):
-            return Response(
-                {'error': 'Too many requests. Please try again later.'},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
+        if getattr(request, "limited", False):
+            return _rate_limited_response()
 
         try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-            user_id_from_token = payload.get('user_id')
+            payload = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+            )
+            user_id_from_token = payload.get("user_id")
 
             if not user_id_from_token:
                 return Response(
-                    {'error': 'Invalid token.'},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {"error": "Invalid token."},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            user = get_object_or_404(User, id=user_id_from_token)
+            with transaction.atomic():
+                user = get_object_or_404(
+                    User.objects.select_for_update(),
+                    id=user_id_from_token,
+                )
 
-            if user.is_active:
-                return redirect('http://localhost:5173/dashboard')
+                if not user.is_active:
+                    previous_value = user.is_active
+                    user.is_active = True
+                    user.save(update_fields=["is_active"])
 
-            user.is_active = True
-            user.save()
-            logger.info(f"Email verified for user id={user_id_from_token}")
-            return redirect('http://localhost:5173/dashboard')
+                    create_user_change_log(
+                        target_user=user,
+                        changed_by=user,
+                        action=UserChangeLog.Action.ACTIVATE,
+                        field_name="is_active",
+                        previous_value=previous_value,
+                        new_value=True,
+                        request=request,
+                    )
+
+                    logger.info(
+                        "Email verified for user id=%s",
+                        user_id_from_token,
+                    )
+
+            dashboard_url = getattr(
+                settings,
+                "FRONTEND_DASHBOARD_URL",
+                "http://localhost:5173/dashboard",
+            )
+
+            return redirect(dashboard_url)
 
         except jwt.ExpiredSignatureError:
-            logger.error("Activation link has expired.")
+            logger.warning("Activation link has expired.")
             return Response(
-                {'error': 'Activation link has expired.'},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Activation link has expired."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         except jwt.InvalidTokenError:
-            logger.error("Invalid activation link.")
+            logger.warning("Invalid activation link.")
             return Response(
-                {'error': 'Invalid activation link.'},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid activation link."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
 
 class LoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+
     def post(self, request):
-        if getattr(request, 'limited', False):
+        if getattr(request, "limited", False):
             return _rate_limited_response()
 
-        email = request.data.get('email')
-        password = request.data.get('password')
+        email = request.data.get("email")
+        password = request.data.get("password")
 
-        try:
-            user = CustomUser.objects.get(email=email)
-        except CustomUser.DoesNotExist:
+        if not email or not password:
             return Response(
-                {'error': 'Incorrect username or password.'},
-                status=status.HTTP_401_UNAUTHORIZED
+                {"error": "Email and password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if user.role.lower() not in ['principal', 'staff']:
+        try:
+            user = CustomUser.objects.get(
+                email__iexact=email.strip()
+            )
+        except CustomUser.DoesNotExist:
             return Response(
-                {'error': 'You are not authorized to access the admin system.'},
-                status=status.HTTP_403_FORBIDDEN
+                {"error": "Incorrect username or password."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if user.role.lower() not in ["principal", "staff"]:
+            return Response(
+                {
+                    "error": (
+                        "You are not authorized to access the admin system."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         if user.is_blocked:
             return Response(
-                {'error': 'Your account has been blocked. Please contact support for assistance.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    "error": (
+                        "Your account has been blocked. Please contact "
+                        "support for assistance."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         if not user.is_active:
             return Response(
-                {'error': 'Account not verified. Please check your email for the verification link.'},
-                status=status.HTTP_401_UNAUTHORIZED
+                {
+                    "error": (
+                        "Account not verified. Please check your email for "
+                        "the verification link."
+                    )
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        if check_password(password, user.password):
-            login(request, user)
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'access_token': str(refresh.access_token),
-                'refresh_token': str(refresh),
-                'user': {
-                    'id': user.id,
-                    'email': user.email,
-                    'role': user.role
-                }
-            })
-        else:
+        if not check_password(password, user.password):
             return Response(
-                {'error': 'Incorrect username or password.'},
-                status=status.HTTP_401_UNAUTHORIZED
+                {"error": "Incorrect username or password."},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
+
+        login(request, user)
+        refresh = RefreshToken.for_user(user)
+
+        return Response(
+            {
+                "access_token": str(refresh.access_token),
+                "refresh_token": str(refresh),
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "role": user.role,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class LogoutView(APIView):
@@ -582,4 +913,11 @@ class LogoutView(APIView):
 
     def post(self, request):
         logout(request)
-        return Response({'success': True, 'message': 'Logged out successfully.'})
+
+        return Response(
+            {
+                "success": True,
+                "message": "Logged out successfully.",
+            },
+            status=status.HTTP_200_OK,
+        )

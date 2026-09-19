@@ -1,4 +1,7 @@
+#authapp serializer
+
 from rest_framework import serializers
+
 from .models import CustomUser, ParentGuardian
 
 
@@ -6,24 +9,24 @@ class ParentGuardianSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParentGuardian
         fields = (
-            'id',
-            'first_name',
-            'middle_name',
-            'last_name',
-            'suffix',
-            'relationship',
-            'primary_phone',
-            'secondary_phone',
-            'email',
-            'street_address',
-            'city',
-            'state_region',
-            'postal_code',
-            'id_type',
-            'id_number',
-            'is_primary_contact',
-            'created_at',
-            'updated_at',
+            "id",
+            "first_name",
+            "middle_name",
+            "last_name",
+            "suffix",
+            "relationship",
+            "primary_phone",
+            "secondary_phone",
+            "email",
+            "street_address",
+            "city",
+            "state_region",
+            "postal_code",
+            "id_type",
+            "id_number",
+            "is_primary_contact",
+            "created_at",
+            "updated_at",
         )
 
 
@@ -35,29 +38,31 @@ class CustomUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = (
-            'id',
-            'email',
-            'first_name',
-            'last_name',
-            'password',
-            'is_active',
-            'is_blocked',
-            'date_joined',
-            'class_name',
-            'role',
-            'index_number',
-            'username',
-            'guardians',        # ← added
+            "id",
+            "email",
+            "first_name",
+            "last_name",
+            "password",
+            "is_active",
+            "is_blocked",
+            "date_joined",
+            "class_name",
+            "role",
+            "index_number",
+            "username",
+            "guardians",
         )
         extra_kwargs = {
-            'role': {'required': False}
+            "role": {"required": False},
         }
 
     def create(self, validated_data):
-        password = validated_data.pop('password', None)
+        password = validated_data.pop("password", None)
         instance = self.Meta.model(**validated_data)
+
         if password is not None:
             instance.set_password(password)
+
         instance.save()
         return instance
 
@@ -82,6 +87,10 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class SendVerificationCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class ResendVerificationEmailSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
 

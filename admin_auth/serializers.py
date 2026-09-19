@@ -1,193 +1,512 @@
-# admin_auth/serializers.py
+#admin_auth serializer
+import json
+
+from django.db import transaction
 from rest_framework import serializers
+
 from authapp.models import CustomUser, ParentGuardian
+from .models import UserChangeLog
+
+
+SENSITIVE_LOG_FIELDS = {
+    "password",
+    "last_login",
+}
+
+
+def _normalise_log_value(value):
+    """
+    Convert model and serializer values into safe, readable text.
+
+    Passwords and other sensitive values must be filtered before this
+    function is called.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, default=str, sort_keys=True)
+
+    return str(value)
+
+
+def _get_client_ip(request):
+    if request is None:
+        return None
+
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    return request.META.get("REMOTE_ADDR")
+
+
+def create_user_change_log(
+    *,
+    target_user,
+    changed_by,
+    action,
+    field_name="",
+    previous_value=None,
+    new_value=None,
+    request=None,
+    target_user_email=None,
+):
+    """
+    Central helper for inserting a user audit record.
+
+    target_user may be None when preserving a deletion record.
+    target_user_email can be supplied explicitly for deletion logging.
+    """
+    if target_user_email is None:
+        target_user_email = getattr(target_user, "email", "") or ""
+
+    changed_by_email = (
+        getattr(changed_by, "email", "")
+        if changed_by is not None
+        else ""
+    )
+
+    UserChangeLog.objects.create(
+        target_user=target_user,
+        target_user_email=target_user_email,
+        changed_by=changed_by,
+        changed_by_email=changed_by_email,
+        action=action,
+        field_name=field_name,
+        previous_value=_normalise_log_value(previous_value),
+        new_value=_normalise_log_value(new_value),
+        request_method=request.method if request else "",
+        request_path=request.path if request else "",
+        ip_address=_get_client_ip(request),
+    )
 
 
 class ParentGuardianSerializer(serializers.ModelSerializer):
-    # Explicitly declare `id` as a writable integer field so we can use it
-    # as the lookup key during updates. Without this, DRF treats the auto-
-    # generated PK as read-only and strips it before validation.
+    # The ID must be writable because guardian updates use it as the lookup key.
     id = serializers.IntegerField(required=False, allow_null=True)
     full_name = serializers.ReadOnlyField()
 
     class Meta:
         model = ParentGuardian
         fields = [
-            'id',
-            'first_name',
-            'middle_name',
-            'last_name',
-            'suffix',
-            'relationship',
-            'primary_phone',
-            'secondary_phone',
-            'email',
-            'street_address',
-            'city',
-            'state_region',
-            'postal_code',
-            'id_type',
-            'id_number',
-            'is_primary_contact',
-            'full_name',
+            "id",
+            "first_name",
+            "middle_name",
+            "last_name",
+            "suffix",
+            "relationship",
+            "primary_phone",
+            "secondary_phone",
+            "email",
+            "street_address",
+            "city",
+            "state_region",
+            "postal_code",
+            "id_type",
+            "id_number",
+            "is_primary_contact",
+            "full_name",
+            "created_at",
+            "updated_at",
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = [
+            "created_at",
+            "updated_at",
+            "full_name",
+        ]
 
 
 class AdminUserSerializer(serializers.ModelSerializer):
-    # Mark guardians as read_only=False but handle all writes manually.
-    # Setting read_only=False + required=False lets the data pass validation
-    # without DRF trying to do its own nested-write handling.
-    guardians = ParentGuardianSerializer(many=True, required=False)
+    guardians = ParentGuardianSerializer(
+        many=True,
+        required=False,
+    )
+
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=False,
+        trim_whitespace=False,
+    )
 
     class Meta:
         model = CustomUser
-        fields = '__all__'
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "password",
+            "is_active",
+            "is_staff",
+            "is_blocked",
+            "date_joined",
+            "role",
+            "is_google_account",
+            "index_number",
+            "class_name",
+            "guardians",
+        ]
+        read_only_fields = [
+            "id",
+            "date_joined",
+            "is_google_account",
+        ]
         extra_kwargs = {
-            'password': {'write_only': True},
+            "email": {"required": True},
+            "username": {"required": True},
         }
+
+    def _request(self):
+        return self.context.get("request")
+
+    def _actor(self):
+        request = self._request()
+
+        if request and request.user and request.user.is_authenticated:
+            return request.user
+
+        return None
 
     def validate_guardians(self, value):
         """
-        Cross-field validation: if any guardian carries an `id`, make sure
-        it actually belongs to the user being updated (prevents IDOR on guardians).
+        If a guardian carries an ID during an update, verify that the guardian
+        belongs to the user being updated.
+
+        Unknown IDs are rejected rather than silently treated as new records.
         """
-        # During create there is no instance yet — skip the ownership check.
         if self.instance is None:
+            for guardian_data in value:
+                if guardian_data.get("id"):
+                    raise serializers.ValidationError(
+                        "Guardian IDs must not be supplied when creating a user."
+                    )
             return value
 
         existing_ids = set(
-            self.instance.guardians.values_list('id', flat=True)
+            self.instance.guardians.values_list("id", flat=True)
         )
+
+        incoming_ids = set()
+
         for guardian_data in value:
-            guardian_id = guardian_data.get('id')
-            if guardian_id and guardian_id not in existing_ids:
+            guardian_id = guardian_data.get("id")
+
+            if guardian_id is None:
+                continue
+
+            if guardian_id in incoming_ids:
+                raise serializers.ValidationError(
+                    f"Guardian id={guardian_id} appears more than once."
+                )
+
+            incoming_ids.add(guardian_id)
+
+            if guardian_id not in existing_ids:
                 raise serializers.ValidationError(
                     f"Guardian with id={guardian_id} does not belong to this user."
                 )
+
         return value
 
     def validate(self, attrs):
         """
-        Object-level validation: ensure no guardian's email matches the
-        student's email.  Mirrors the same constraint enforced in
-        ParentGuardian.clean() so that the API returns a clean 400 with a
-        readable message rather than a 500 from an IntegrityError / ValidationError
-        raised deep inside model.save().
-
-        Checked in three scenarios:
-          1. Creating a new student — student email comes from attrs.
-          2. Updating a student's email only — guardians come from the existing instance.
-          3. Updating guardians only (or both at once) — student email comes from
-             attrs if present, else from the existing instance.
+        Ensure no guardian email matches the student's email.
         """
-        guardians_data = attrs.get('guardians')
+        guardians_data = attrs.get("guardians")
 
-        # ── Determine the student email we should validate against ────────
-        student_email = attrs.get('email')
+        student_email = attrs.get("email")
         if not student_email and self.instance:
             student_email = self.instance.email
 
         if not student_email:
-            # Nothing to validate against yet (incomplete create payload handled
-            # elsewhere by required-field checks).
             return attrs
 
-        # ── Collect guardian emails to check ──────────────────────────────
-        # Case A: guardians are present in this request payload.
-        if guardians_data is not None:
-            conflicting = [
-                gd.get('email', '')
-                for gd in guardians_data
-                if gd.get('email', '').lower() == student_email.lower()
-            ]
-            if conflicting:
-                raise serializers.ValidationError(
-                    {
-                        'guardians': (
-                            "A guardian's email cannot be the same as the student's "
-                            f"email ({student_email}). Please use a different email "
-                            "address for the guardian."
-                        )
-                    }
-                )
+        normalised_student_email = student_email.strip().lower()
 
-        # Case B: only the student's email is being changed — check existing
-        # guardians on the instance so a rename doesn't silently create a
-        # conflict with an already-saved guardian.
-        elif self.instance and 'email' in attrs:
-            conflicting_existing = list(
-                self.instance.guardians
-                .filter(email__iexact=student_email)
-                .values_list('email', flat=True)
-            )
-            if conflicting_existing:
+        if guardians_data is not None:
+            for guardian_data in guardians_data:
+                guardian_email = (
+                    guardian_data.get("email") or ""
+                ).strip().lower()
+
+                if (
+                    guardian_email
+                    and guardian_email == normalised_student_email
+                ):
+                    raise serializers.ValidationError(
+                        {
+                            "guardians": (
+                                "A guardian's email cannot be the same as the "
+                                f"student's email ({student_email}). Please use "
+                                "a different email address for the guardian."
+                            )
+                        }
+                    )
+
+        elif self.instance and "email" in attrs:
+            conflict_exists = self.instance.guardians.filter(
+                email__iexact=student_email.strip()
+            ).exists()
+
+            if conflict_exists:
                 raise serializers.ValidationError(
                     {
-                        'email': (
-                            f"The new student email ({student_email}) conflicts with "
-                            "an existing guardian email on this account. Update or "
-                            "remove the guardian's email first."
+                        "email": (
+                            f"The new student email ({student_email}) conflicts "
+                            "with an existing guardian email on this account. "
+                            "Update or remove the guardian's email first."
                         )
                     }
                 )
 
         return attrs
 
+    @transaction.atomic
     def create(self, validated_data):
-        guardians_data = validated_data.pop('guardians', [])
-        user = CustomUser.objects.create_user(**validated_data)
+        guardians_data = validated_data.pop("guardians", [])
+        password = validated_data.pop("password", None)
+
+        if not password:
+            raise serializers.ValidationError(
+                {"password": "A password is required when creating a user."}
+            )
+
+        user = CustomUser.objects.create_user(
+            password=password,
+            **validated_data,
+        )
+
+        actor = self._actor()
+        request = self._request()
+
+        create_user_change_log(
+            target_user=user,
+            changed_by=actor,
+            action=UserChangeLog.Action.CREATE,
+            field_name="account",
+            previous_value=None,
+            new_value=f"User account created with role={user.role}",
+            request=request,
+        )
+
         for guardian_data in guardians_data:
-            guardian_data.pop('id', None)   # PK is meaningless on create
-            ParentGuardian.objects.create(student=user, **guardian_data)
+            guardian_data.pop("id", None)
+
+            guardian = ParentGuardian.objects.create(
+                student=user,
+                **guardian_data,
+            )
+
+            create_user_change_log(
+                target_user=user,
+                changed_by=actor,
+                action=UserChangeLog.Action.GUARDIAN_CREATE,
+                field_name=f"guardian[{guardian.id}]",
+                previous_value=None,
+                new_value={
+                    "id": guardian.id,
+                    "full_name": guardian.full_name,
+                    "relationship": guardian.relationship,
+                },
+                request=request,
+            )
+
         return user
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        # Pop guardians BEFORE calling super() so DRF never sees the nested
-        # data and cannot raise its "writable nested fields" AssertionError.
-        guardians_data = validated_data.pop('guardians', None)
+        guardians_data = validated_data.pop("guardians", None)
+        password = validated_data.pop("password", None)
 
-        # Let DRF handle all the flat user fields normally.
-        instance = super().update(instance, validated_data)
+        actor = self._actor()
+        request = self._request()
 
-        # Sync guardians only when the key was actually present in the payload.
-        # A PATCH request that omits "guardians" entirely leaves them untouched.
+        original_values = {}
+
+        for field_name in validated_data:
+            if field_name in SENSITIVE_LOG_FIELDS:
+                continue
+
+            original_values[field_name] = getattr(
+                instance,
+                field_name,
+                None,
+            )
+
+        old_email = instance.email
+
+        # Update ordinary model fields manually. This prevents nested data
+        # from reaching DRF's default ModelSerializer update implementation.
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        update_fields = list(validated_data.keys())
+
+        if password is not None:
+            instance.set_password(password)
+            update_fields.append("password")
+
+        if update_fields:
+            instance.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        for field_name, previous_value in original_values.items():
+            new_value = getattr(instance, field_name, None)
+
+            if _normalise_log_value(previous_value) != _normalise_log_value(
+                new_value
+            ):
+                create_user_change_log(
+                    target_user=instance,
+                    target_user_email=instance.email or old_email,
+                    changed_by=actor,
+                    action=UserChangeLog.Action.UPDATE,
+                    field_name=field_name,
+                    previous_value=previous_value,
+                    new_value=new_value,
+                    request=request,
+                )
+
+        if password is not None:
+            create_user_change_log(
+                target_user=instance,
+                changed_by=actor,
+                action=UserChangeLog.Action.UPDATE,
+                field_name="password",
+                previous_value="[PROTECTED]",
+                new_value="[CHANGED]",
+                request=request,
+            )
+
         if guardians_data is not None:
-            self._sync_guardians(instance, guardians_data)
+            self._sync_guardians(
+                user=instance,
+                guardians_data=guardians_data,
+                actor=actor,
+                request=request,
+            )
 
         return instance
 
-    def _sync_guardians(self, user, guardians_data):
+    def _sync_guardians(self, user, guardians_data, actor, request):
         """
-        Full replace / upsert for the guardian list.
+        Full replacement and upsert of a user's guardian list.
 
-        Rules
-        -----
-        • Dict has an `id` that belongs to this user  → UPDATE in place.
-        • Dict has no `id` (or id=None / unknown id)  → CREATE new record.
-        • Existing guardian whose `id` is absent       → DELETE (removed by caller).
+        A guardian with an ID is updated.
+        A guardian without an ID is created.
+        Existing guardians omitted from the submitted list are deleted.
         """
-        existing_map = {g.id: g for g in user.guardians.all()}
+        existing_map = {
+            guardian.id: guardian
+            for guardian in user.guardians.all()
+        }
+
         incoming_ids = set()
 
-        for guardian_data in guardians_data:
-            guardian_id = guardian_data.pop('id', None)
+        for raw_guardian_data in guardians_data:
+            guardian_data = dict(raw_guardian_data)
+            guardian_id = guardian_data.pop("id", None)
 
-            if guardian_id and guardian_id in existing_map:
-                # ── UPDATE ────────────────────────────────────────────────
+            if guardian_id is not None:
                 guardian = existing_map[guardian_id]
-                for attr, value in guardian_data.items():
-                    setattr(guardian, attr, value)
-                guardian.save()
                 incoming_ids.add(guardian_id)
-            else:
-                # ── CREATE ────────────────────────────────────────────────
-                new_guardian = ParentGuardian.objects.create(
-                    student=user, **guardian_data
-                )
-                incoming_ids.add(new_guardian.id)
 
-        # ── DELETE guardians removed from the list ────────────────────────
+                for attr, new_value in guardian_data.items():
+                    previous_value = getattr(guardian, attr, None)
+
+                    if _normalise_log_value(
+                        previous_value
+                    ) == _normalise_log_value(new_value):
+                        continue
+
+                    setattr(guardian, attr, new_value)
+
+                    create_user_change_log(
+                        target_user=user,
+                        changed_by=actor,
+                        action=UserChangeLog.Action.GUARDIAN_UPDATE,
+                        field_name=f"guardian[{guardian.id}].{attr}",
+                        previous_value=previous_value,
+                        new_value=new_value,
+                        request=request,
+                    )
+
+                guardian.save()
+
+            else:
+                guardian = ParentGuardian.objects.create(
+                    student=user,
+                    **guardian_data,
+                )
+                incoming_ids.add(guardian.id)
+
+                create_user_change_log(
+                    target_user=user,
+                    changed_by=actor,
+                    action=UserChangeLog.Action.GUARDIAN_CREATE,
+                    field_name=f"guardian[{guardian.id}]",
+                    previous_value=None,
+                    new_value={
+                        "id": guardian.id,
+                        "full_name": guardian.full_name,
+                        "relationship": guardian.relationship,
+                    },
+                    request=request,
+                )
+
         ids_to_delete = set(existing_map.keys()) - incoming_ids
-        if ids_to_delete:
-            ParentGuardian.objects.filter(id__in=ids_to_delete).delete()
+
+        for guardian_id in ids_to_delete:
+            guardian = existing_map[guardian_id]
+
+            guardian_snapshot = {
+                "id": guardian.id,
+                "full_name": guardian.full_name,
+                "relationship": guardian.relationship,
+                "primary_phone": guardian.primary_phone,
+                "email": guardian.email,
+            }
+
+            create_user_change_log(
+                target_user=user,
+                changed_by=actor,
+                action=UserChangeLog.Action.GUARDIAN_DELETE,
+                field_name=f"guardian[{guardian.id}]",
+                previous_value=guardian_snapshot,
+                new_value=None,
+                request=request,
+            )
+
+            guardian.delete()
+
+
+class UserChangeLogSerializer(serializers.ModelSerializer):
+    action_display = serializers.CharField(
+        source="get_action_display",
+        read_only=True,
+    )
+
+    class Meta:
+        model = UserChangeLog
+        fields = [
+            "id",
+            "target_user",
+            "target_user_email",
+            "changed_by",
+            "changed_by_email",
+            "action",
+            "action_display",
+            "field_name",
+            "previous_value",
+            "new_value",
+            "changed_at",
+            "request_method",
+            "request_path",
+            "ip_address",
+        ]
+        read_only_fields = fields
