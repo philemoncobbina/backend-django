@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from django.conf import settings
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -481,4 +482,72 @@ class AttendanceChangeLog(models.Model):
         return (
             f"Log for register {self.register_id} "
             f"({self.action_type}) by {self.user_email} at {self.timestamp}"
+        )
+
+
+class AttendanceNotificationLog(models.Model):
+    """
+    One row per (register, student, channel) guardian notification.
+
+    This is what stops the same absence email/SMS from being sent again when
+    a register is corrected, re-finalized, or the Celery task is re-run.
+
+    The unique constraint is the real guarantee: even if two workers run the
+    task at the same moment, only one of them can create (claim) the row.
+    """
+
+    CHANNEL_EMAIL = "email"
+    CHANNEL_SMS = "sms"
+    CHANNEL_CHOICES = [
+        (CHANNEL_EMAIL, "Email"),
+        (CHANNEL_SMS, "SMS"),
+    ]
+
+    STATUS_PENDING = "pending"  # claimed by a worker, send in progress
+    STATUS_SENT = "sent"        # delivered to the provider successfully
+    STATUS_FAILED = "failed"    # provider/config error; eligible for retry
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_SENT, "Sent"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    register = models.ForeignKey(
+        "ClassAttendanceRegister",
+        on_delete=models.CASCADE,
+        related_name="notification_logs",
+    )
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="attendance_notification_logs",
+    )
+    channel = models.CharField(max_length=10, choices=CHANNEL_CHOICES)
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    recipient = models.CharField(max_length=255, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["register", "student", "channel"],
+                name="uniq_attendance_notification_per_register_student_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["register", "status"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.channel} -> student {self.student_id} "
+            f"(register {self.register_id}): {self.status}"
         )

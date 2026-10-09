@@ -1,18 +1,34 @@
 import logging
-from typing import Dict, List, Optional, Tuple
+from datetime import timedelta
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
 from celery import shared_task
 from django.conf import settings
+from django.db.models import Q
+from django.utils import timezone
 from django.utils.html import escape
 
 from authapp.models import ParentGuardian
-from .models import ClassAttendanceRegister, AttendanceRecord
+from .models import (
+    AttendanceNotificationLog,
+    AttendanceRecord,
+    ClassAttendanceRegister,
+)
 
 logger = logging.getLogger(__name__)
 
 
 BREVO_EMAIL_URL = "https://api.brevo.com/v3/smtp/email"
+
+CHANNEL_EMAIL = AttendanceNotificationLog.CHANNEL_EMAIL
+CHANNEL_SMS = AttendanceNotificationLog.CHANNEL_SMS
+
+# If a worker claims a notification (status=pending) and then dies before it
+# records the outcome, the claim is treated as abandoned after this long and
+# another run is allowed to pick it up. Must be comfortably longer than one
+# provider call (both use a 20s timeout).
+PENDING_CLAIM_TIMEOUT = timedelta(minutes=10)
 
 
 def _student_full_name(student) -> str:
@@ -272,6 +288,163 @@ def _send_twilio_sms(*, to_phone: str, sms_body: str) -> Dict:
         }
 
 
+# ---------------------------------------------------------------------------
+# De-duplication helpers
+#
+# A register can be finalized many times (finalize -> principal reopens ->
+# correction -> finalize again). Each finalize queues this task, so the task
+# itself must guarantee that a guardian is told about a given absence only
+# once per register, per channel.
+# ---------------------------------------------------------------------------
+
+
+def _skipped_result(channel: str, reason: str) -> Dict:
+    """
+    Result for a notification that was deliberately not sent.
+
+    `success` is False so it is never counted as a fresh send; the
+    `skipped` flag distinguishes it from a real failure.
+    """
+    return {
+        "success": False,
+        "skipped": True,
+        "channel": channel,
+        "reason": reason,
+    }
+
+
+def _claim_notification(
+    *,
+    register: ClassAttendanceRegister,
+    student,
+    channel: str,
+    recipient: str,
+) -> Optional[AttendanceNotificationLog]:
+    """
+    Atomically claims the right to send one (register, student, channel)
+    notification. Returns the log row if THIS run should send it, or None if
+    it must not (already sent, or another worker is sending it right now).
+
+    - No row yet            -> create it as pending and send.
+    - Row is 'sent'         -> never send again.
+    - Row is 'failed'       -> re-claim and retry.
+    - Row is 'pending'      -> someone else is mid-send; only re-claim if the
+                               claim is stale (worker likely crashed).
+
+    The unique constraint on the model makes get_or_create race-safe, and the
+    conditional UPDATE below makes re-claiming race-safe: only one caller can
+    flip the row back to pending.
+    """
+    log, created = AttendanceNotificationLog.objects.get_or_create(
+        register=register,
+        student=student,
+        channel=channel,
+        defaults={
+            "status": AttendanceNotificationLog.STATUS_PENDING,
+            "recipient": recipient,
+        },
+    )
+
+    if created:
+        return log
+
+    if log.status == AttendanceNotificationLog.STATUS_SENT:
+        return None
+
+    now = timezone.now()
+    claimable = Q(status=AttendanceNotificationLog.STATUS_FAILED) | Q(
+        status=AttendanceNotificationLog.STATUS_PENDING,
+        updated_at__lt=now - PENDING_CLAIM_TIMEOUT,
+    )
+
+    claimed = (
+        AttendanceNotificationLog.objects.filter(pk=log.pk)
+        .filter(claimable)
+        .update(
+            status=AttendanceNotificationLog.STATUS_PENDING,
+            recipient=recipient,
+            updated_at=now,  # .update() bypasses auto_now
+        )
+    )
+
+    if not claimed:
+        return None
+
+    log.refresh_from_db()
+    return log
+
+
+def _record_outcome(log: AttendanceNotificationLog, result: Dict) -> None:
+    if result.get("success") is True:
+        log.status = AttendanceNotificationLog.STATUS_SENT
+        log.sent_at = timezone.now()
+        log.error = ""
+    else:
+        log.status = AttendanceNotificationLog.STATUS_FAILED
+        log.error = str(result.get("error", ""))[:1000]
+
+    log.save(update_fields=["status", "sent_at", "error", "updated_at"])
+
+
+def _send_once(
+    *,
+    register: ClassAttendanceRegister,
+    student,
+    channel: str,
+    recipient: str,
+    send: Callable[[], Dict],
+) -> Dict:
+    """
+    Runs `send()` only if this (register, student, channel) has not already
+    been delivered, and records the outcome so later runs skip it.
+    """
+    log = _claim_notification(
+        register=register,
+        student=student,
+        channel=channel,
+        recipient=recipient,
+    )
+
+    if log is None:
+        return _skipped_result(
+            channel,
+            "Already notified for this register (or being sent by another worker).",
+        )
+
+    try:
+        result = send()
+    except Exception as exc:  # never leave the claim stuck in 'pending'
+        logger.exception(
+            "Unexpected error sending %s notification. register_id=%s student_id=%s",
+            channel,
+            register.id,
+            student.id,
+        )
+        result = {"success": False, "channel": channel, "error": str(exc)}
+
+    _record_outcome(log, result)
+    return result
+
+
+def _already_sent_channels(register: ClassAttendanceRegister) -> Dict[int, Set[str]]:
+    """
+    One query: {student_id: {channels already delivered}} for this register.
+    Lets the loop skip fully-notified students without extra per-student
+    queries or building messages.
+    """
+    sent: Dict[int, Set[str]] = {}
+
+    rows = AttendanceNotificationLog.objects.filter(
+        register=register,
+        status=AttendanceNotificationLog.STATUS_SENT,
+    ).values_list("student_id", "channel")
+
+    for student_id, channel in rows:
+        sent.setdefault(student_id, set()).add(channel)
+
+    return sent
+
+
 @shared_task(
     bind=True,
     autoretry_for=(requests.RequestException,),
@@ -283,13 +456,16 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
     Sends email and SMS to the primary guardian of every absent student
     after a class attendance register is finalized.
 
-    This task is intentionally idempotent at the notification-result level only.
-    It does not create a separate notification database record, so if you manually
-    rerun the task, parents may receive the notification again.
+    Idempotent per (register, student, channel): every delivery is recorded in
+    AttendanceNotificationLog, so a guardian who has already been told about
+    an absence is NOT contacted again when the register is corrected and
+    re-finalized, or when this task is re-run manually.
 
-    Recommended future improvement:
-    Create an AttendanceNotificationLog model to permanently prevent duplicate
-    notifications per register, student, and channel.
+    What this means in practice:
+    - Student still absent after a correction   -> no repeat message.
+    - Student newly marked absent in a correction -> notified (first time).
+    - Student changed to present                -> nothing is sent.
+    - A previous send failed                    -> only that channel is retried.
     """
     try:
         register = (
@@ -341,11 +517,30 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
             "message": "No absent students to notify.",
         }
 
+    already_sent = _already_sent_channels(register)
+
     results: List[Dict] = []
 
     for record in absent_records:
         student = record.student
         student_name = _student_full_name(student)
+        sent_channels = already_sent.get(student.id, set())
+
+        # Fast path: both channels already delivered on an earlier finalize.
+        if CHANNEL_EMAIL in sent_channels and CHANNEL_SMS in sent_channels:
+            results.append({
+                "student_id": student.id,
+                "student_name": student_name,
+                "email": _skipped_result(CHANNEL_EMAIL, "Already notified."),
+                "sms": _skipped_result(CHANNEL_SMS, "Already notified."),
+            })
+            logger.info(
+                "Attendance notification skipped (already sent). "
+                "register_id=%s student_id=%s",
+                register.id,
+                student.id,
+            )
+            continue
 
         guardian = _get_primary_guardian(student)
 
@@ -378,16 +573,22 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
             "If this is incorrect, kindly contact the school office."
         )
 
-        email_result = None
-        sms_result = None
-
-        if guardian.email:
-            email_result = _send_brevo_email(
-                to_email=guardian.email,
-                to_name=guardian_name,
-                subject=subject,
-                text_body=text_body,
-                html_body=html_body,
+        # ----- Email -----
+        if CHANNEL_EMAIL in sent_channels:
+            email_result = _skipped_result(CHANNEL_EMAIL, "Already notified.")
+        elif guardian.email:
+            email_result = _send_once(
+                register=register,
+                student=student,
+                channel=CHANNEL_EMAIL,
+                recipient=guardian.email,
+                send=lambda: _send_brevo_email(
+                    to_email=guardian.email,
+                    to_name=guardian_name,
+                    subject=subject,
+                    text_body=text_body,
+                    html_body=html_body,
+                ),
             )
         else:
             email_result = {
@@ -396,10 +597,19 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
                 "error": "Guardian email is missing.",
             }
 
-        if guardian.primary_phone:
-            sms_result = _send_twilio_sms(
-                to_phone=guardian.primary_phone,
-                sms_body=sms_body,
+        # ----- SMS -----
+        if CHANNEL_SMS in sent_channels:
+            sms_result = _skipped_result(CHANNEL_SMS, "Already notified.")
+        elif guardian.primary_phone:
+            sms_result = _send_once(
+                register=register,
+                student=student,
+                channel=CHANNEL_SMS,
+                recipient=guardian.primary_phone,
+                send=lambda: _send_twilio_sms(
+                    to_phone=guardian.primary_phone,
+                    sms_body=sms_body,
+                ),
             )
         else:
             sms_result = {
@@ -423,12 +633,15 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
 
         logger.info(
             "Attendance absence notification processed. "
-            "register_id=%s student_id=%s guardian_id=%s email_success=%s sms_success=%s",
+            "register_id=%s student_id=%s guardian_id=%s "
+            "email_success=%s email_skipped=%s sms_success=%s sms_skipped=%s",
             register.id,
             student.id,
             guardian.id,
-            email_result.get("success") if email_result else False,
-            sms_result.get("success") if sms_result else False,
+            email_result.get("success"),
+            email_result.get("skipped", False),
+            sms_result.get("success"),
+            sms_result.get("skipped", False),
         )
 
     email_success_count = sum(
@@ -441,6 +654,16 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
         if item.get("sms", {}).get("success") is True
     )
 
+    email_skipped_count = sum(
+        1 for item in results
+        if item.get("email", {}).get("skipped") is True
+    )
+
+    sms_skipped_count = sum(
+        1 for item in results
+        if item.get("sms", {}).get("skipped") is True
+    )
+
     return {
         "success": True,
         "register_id": register.id,
@@ -449,6 +672,7 @@ def notify_absent_students_after_finalize(self, register_id: int) -> Dict:
         "total_absent": total_absent,
         "email_success_count": email_success_count,
         "sms_success_count": sms_success_count,
+        "email_skipped_count": email_skipped_count,
+        "sms_skipped_count": sms_skipped_count,
         "results": results,
     }
-

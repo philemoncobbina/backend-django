@@ -1,5 +1,6 @@
 #authapp serializer
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import CustomUser, ParentGuardian
@@ -35,6 +36,9 @@ class CustomUserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(read_only=True)
     guardians = ParentGuardianSerializer(many=True, read_only=True)
 
+    # Fields tied to the Graduated / Stopped statuses of `class_name`
+    STATUS_FIELDS = ("graduation_year", "stopped_class", "stop_reason", "stop_year")
+
     class Meta:
         model = CustomUser
         fields = (
@@ -47,6 +51,10 @@ class CustomUserSerializer(serializers.ModelSerializer):
             "is_blocked",
             "date_joined",
             "class_name",
+            "graduation_year",
+            "stopped_class",
+            "stop_reason",
+            "stop_year",
             "role",
             "index_number",
             "username",
@@ -55,6 +63,41 @@ class CustomUserSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "role": {"required": False},
         }
+
+    def validate(self, attrs):
+        """
+        Enforce the Graduated / Stopped rules:
+          - Graduated -> graduation_year required
+          - Stopped   -> stopped_class, stop_reason and stop_year required
+          - Any regular class -> status fields are cleared automatically
+        Works for create, full update and partial update (PATCH).
+        """
+        attrs = super().validate(attrs)
+
+        # On updates, only run when class_name or a status field is being changed.
+        touches_status = "class_name" in attrs or any(f in attrs for f in self.STATUS_FIELDS)
+        if self.instance is not None and not touches_status:
+            return attrs
+
+        def current(name):
+            """Incoming value if provided, otherwise the value already on the instance."""
+            if name in attrs:
+                return attrs[name]
+            return getattr(self.instance, name, None) if self.instance else None
+
+        try:
+            cleaned = CustomUser.resolve_status_fields(
+                current("class_name"),
+                graduation_year=current("graduation_year"),
+                stopped_class=current("stopped_class"),
+                stop_reason=current("stop_reason"),
+                stop_year=current("stop_year"),
+            )
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.message_dict)
+
+        attrs.update(cleaned)
+        return attrs
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
