@@ -53,12 +53,37 @@ from .cache_utils import (
 logger = logging.getLogger(__name__)
 
 
+class IsSchoolMemberReadOnly(permissions.BasePermission):
+    """
+    Read-only access for any signed-in school member (student, staff,
+    principal). Write methods are never allowed through this class.
+
+    FIX (student 403): AcademicTermViewSet used to require
+    IsStaffOrPrincipal for every action, so the Student Portal's
+    GET /terms/?is_current=true was rejected with 403 before the student
+    could even look up the current term. The term calendar is not
+    sensitive, so students may read it, but only read it.
+    """
+
+    allowed_roles = ("student", "staff", "principal")
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+
+        if request.method not in permissions.SAFE_METHODS:
+            return False
+
+        return getattr(user, "role", None) in self.allowed_roles
+
+
 class AcademicTermViewSet(viewsets.ModelViewSet):
     """
-    Staff and principal can view every term.
+    Students, staff and principal can view terms (read-only).
 
     Only a principal can create, edit, or delete a term.
-    The calendar is structural data, so it is locked down.
+    The calendar is structural data, so writes are locked down.
     """
 
     queryset = AcademicTerm.objects.all().prefetch_related("holidays")
@@ -87,8 +112,14 @@ class AcademicTermViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
+        # Writes: principal only.
         if self.action in ["create", "update", "partial_update", "destroy"]:
             return [permissions.IsAuthenticated(), IsPrincipal()]
+
+        # Reads: students, staff and principal (students need the current
+        # term id to load their own attendance summary).
+        if self.action in ["list", "retrieve", "calendar"]:
+            return [permissions.IsAuthenticated(), IsSchoolMemberReadOnly()]
 
         return [permissions.IsAuthenticated(), IsStaffOrPrincipal()]
 
@@ -647,6 +678,70 @@ class StudentsByClassView(APIView):
         return Response(StudentMiniSerializer(students, many=True).data)
 
 
+class MyAttendanceClassesView(APIView):
+    """
+    GET /attendance/my-classes/
+
+    Student-only. Tells the Student Portal which classes the logged-in
+    student can pick from, and which (class, term) pairs have finalized
+    attendance on record.
+
+    Returns:
+    - current_class: the student's class right now
+    - classes: the current class plus every class the student has
+      finalized attendance in, in CLASS_CHOICES order
+    - terms: [{class_name, term}] pairs (term is the AcademicTerm id)
+      that have finalized records for this student
+
+    Only finalized registers are counted, because the portal never shows
+    a mark a teacher might still change.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if getattr(user, "role", None) != "student":
+            return Response(
+                {"detail": "Only students can view their own class history."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        rows = list(
+            AttendanceRecord.objects.filter(
+                student=user,
+                register__is_finalized=True,
+            )
+            .order_by()
+            .values_list("register__class_name", "register__term_id")
+            .distinct()
+        )
+
+        seen_classes = {class_name for class_name, _ in rows}
+        if user.class_name:
+            seen_classes.add(user.class_name)
+
+        classes = [
+            {
+                "value": value,
+                "label": label,
+                "is_current": value == user.class_name,
+            }
+            for value, label in CustomUser.CLASS_CHOICES
+            if value in seen_classes
+        ]
+
+        return Response({
+            "current_class": user.class_name,
+            "classes": classes,
+            "terms": [
+                {"class_name": class_name, "term": term_id}
+                for class_name, term_id in rows
+            ],
+        })
+
+
 class StudentAttendanceSummaryView(APIView):
     """
     Staff or principal flow:
@@ -655,32 +750,38 @@ class StudentAttendanceSummaryView(APIView):
 
     Student flow:
 
-    GET /attendance/summary/?term=<id>
+    GET /attendance/summary/?term=<id>[&class_name=<class_name>]
 
     For staff/principal:
     - term is required
     - class_name is required
-    - student is required
+    - student is required (and must belong to class_name right now)
 
     For student:
     - term is required
+    - class_name is optional and defaults to the student's current class,
+      so a student promoted through several classes can look back at any
+      class they were in
     - the logged-in student is used automatically
 
     Returns:
     - student details
     - term details
+    - the class the summary is for
     - summary totals
-    - all attendance records taken for that student in that term
+    - all attendance records taken for that student, in that class, in
+      that term
 
-    Cached per (student, term) with a short TTL — this rebuilds the full
-    attendance_history list on every call, which gets expensive as a term
-    goes on. Invalidated by any write that touches this student's records
-    (mark, individual record CRUD, finalize, reopen) and by any term/
-    holiday edit that changes total_school_days.
+    Caching: the cache key stays (student, term), so the existing
+    invalidation (mark, record CRUD, finalize, reopen, term/holiday edits)
+    keeps working untouched. The cached payload holds the student's records
+    for that term across ALL classes; the class filter and the totals are
+    applied after the cache read, which is cheap (an in-memory filter over
+    at most one term of records).
 
-    FIX (stampede protection): also goes through get_or_compute_locked(),
-    since this rebuild (a full history walk) is the most expensive of the
-    three cached endpoints and the one where a stampede would hurt most.
+    FIX (stampede protection): goes through get_or_compute_locked(), since
+    this rebuild (a full history walk) is the most expensive of the cached
+    endpoints and the one where a stampede would hurt most.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -697,10 +798,17 @@ class StudentAttendanceSummaryView(APIView):
             )
 
         term = get_object_or_404(AcademicTerm, pk=term_id)
+        valid_classes = [value for value, label in CustomUser.CLASS_CHOICES]
 
         if request.user.role == "student":
             student = request.user
-            class_name = student.class_name
+            class_name = class_name or student.class_name
+
+            if class_name not in valid_classes:
+                return Response(
+                    {"detail": "Invalid class_name supplied."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
             if request.user.role not in ["staff", "principal"]:
                 return Response(
@@ -719,8 +827,6 @@ class StudentAttendanceSummaryView(APIView):
                     {"detail": "student query param is required."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
-            valid_classes = [value for value, label in CustomUser.CLASS_CHOICES]
 
             if class_name not in valid_classes:
                 return Response(
@@ -747,36 +853,16 @@ class StudentAttendanceSummaryView(APIView):
 
         cache_key = summary_key(student.id, term.id)
 
-        def _build_summary():
+        def _build_term_history():
             records = AttendanceRecord.objects.filter(
                 student=student,
                 register__term=term,
-                register__class_name=student.class_name,
             ).select_related(
                 "register",
                 "register__term",
                 "register__marked_by",
                 "student",
             ).order_by("register__date", "id")
-
-            days_present = records.filter(status="present").count()
-            days_absent = records.filter(status="absent").count()
-            total_marked = days_present + days_absent
-
-            total_school_days = term.total_school_days
-            days_unmarked = max(total_school_days - total_marked, 0)
-
-            attendance_percentage = (
-                round((days_present / total_school_days) * 100, 2)
-                if total_school_days
-                else 0.0
-            )
-
-            marked_attendance_percentage = (
-                round((days_present / total_marked) * 100, 2)
-                if total_marked
-                else 0.0
-            )
 
             attendance_history = []
 
@@ -805,17 +891,6 @@ class StudentAttendanceSummaryView(APIView):
                 })
 
             return {
-                "student": {
-                    "id": student.id,
-                    "index_number": getattr(student, "index_number", ""),
-                    "first_name": student.first_name,
-                    "last_name": student.last_name,
-                    "full_name": (
-                        f"{student.first_name} {student.last_name}".strip()
-                        or student.username
-                    ),
-                    "class_name": student.class_name,
-                },
                 "term": {
                     "id": term.id,
                     "academic_year": term.academic_year,
@@ -823,19 +898,60 @@ class StudentAttendanceSummaryView(APIView):
                     "term_display": term.get_term_display(),
                     "start_date": term.start_date,
                     "end_date": term.end_date,
-                    "total_school_days": total_school_days,
-                },
-                "summary": {
-                    "total_school_days": total_school_days,
-                    "total_marked": total_marked,
-                    "days_present": days_present,
-                    "days_absent": days_absent,
-                    "days_unmarked": days_unmarked,
-                    "attendance_percentage": attendance_percentage,
-                    "marked_attendance_percentage": marked_attendance_percentage,
+                    "total_school_days": term.total_school_days,
                 },
                 "attendance_history": attendance_history,
             }
 
-        response_data = get_or_compute_locked(cache_key, _build_summary, CACHE_TTL_SHORT)
-        return Response(response_data)
+        term_data = get_or_compute_locked(cache_key, _build_term_history, CACHE_TTL_SHORT)
+
+        # Class filter + totals are applied after the cache read.
+        attendance_history = [
+            row for row in term_data["attendance_history"]
+            if row["class_name"] == class_name
+        ]
+
+        days_present = sum(1 for row in attendance_history if row["status"] == "present")
+        days_absent = sum(1 for row in attendance_history if row["status"] == "absent")
+        total_marked = days_present + days_absent
+
+        total_school_days = term_data["term"]["total_school_days"]
+        days_unmarked = max(total_school_days - total_marked, 0)
+
+        attendance_percentage = (
+            round((days_present / total_school_days) * 100, 2)
+            if total_school_days
+            else 0.0
+        )
+
+        marked_attendance_percentage = (
+            round((days_present / total_marked) * 100, 2)
+            if total_marked
+            else 0.0
+        )
+
+        return Response({
+            "student": {
+                "id": student.id,
+                "index_number": getattr(student, "index_number", ""),
+                "first_name": student.first_name,
+                "last_name": student.last_name,
+                "full_name": (
+                    f"{student.first_name} {student.last_name}".strip()
+                    or student.username
+                ),
+                "class_name": student.class_name,
+            },
+            "class_name": class_name,
+            "term": term_data["term"],
+            "summary": {
+                "total_school_days": total_school_days,
+                "total_marked": total_marked,
+                "days_present": days_present,
+                "days_absent": days_absent,
+                "days_unmarked": days_unmarked,
+                "attendance_percentage": attendance_percentage,
+                "marked_attendance_percentage": marked_attendance_percentage,
+            },
+            "attendance_history": attendance_history,
+        })

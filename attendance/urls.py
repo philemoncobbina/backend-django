@@ -8,6 +8,7 @@ from .views import (
     AttendanceRecordViewSet,
     AttendanceChangeLogViewSet,
     StudentAttendanceSummaryView,
+    MyAttendanceClassesView,
     ClassChoicesView,
     StudentsByClassView,
 )
@@ -21,6 +22,7 @@ router.register(r"logs", AttendanceChangeLogViewSet, basename="attendance-log")
 
 urlpatterns = [
     path("classes/", ClassChoicesView.as_view(), name="attendance-classes"),
+    path("my-classes/", MyAttendanceClassesView.as_view(), name="attendance-my-classes"),
     path("students-by-class/", StudentsByClassView.as_view(), name="students-by-class"),
     path("summary/", StudentAttendanceSummaryView.as_view(), name="attendance-summary"),
     path("", include(router.urls)),

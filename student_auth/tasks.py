@@ -1,209 +1,360 @@
+# student_auth/tasks.py
+
 """
-student_auth/tasks.py
-=====================
-Celery tasks that handle all I/O-bound work asynchronously so the API
-response returns immediately.  Views pass only primitive, JSON-serialisable
-arguments — never model instances — to keep serialisation simple and safe.
+Celery tasks for student email verification.
+
+The verification link generated here points to the dedicated student
+verification endpoint. Student tokens must never be sent to the general
+authapp verification endpoint because the two endpoints accept different
+token types.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
+import jwt
 from celery import shared_task
 from django.conf import settings
-
-from sib_api_v3_sdk import Configuration, ApiClient, SendSmtpEmail
-from sib_api_v3_sdk.api.transactional_emails_api import TransactionalEmailsApi
+from django.contrib.auth import get_user_model
+from django.urls import reverse
+from django.utils.html import escape
+from sib_api_v3_sdk import (
+    ApiClient,
+    Configuration,
+    SendSmtpEmail,
+)
+from sib_api_v3_sdk.api.transactional_emails_api import (
+    TransactionalEmailsApi,
+)
 from sib_api_v3_sdk.rest import ApiException
 
 logger = logging.getLogger(__name__)
 
+STUDENT_VERIFY_TOKEN_TYPE = "student_email_verification"
 
-# ---------------------------------------------------------------------------
-# Internal helpers (not tasks themselves)
-# ---------------------------------------------------------------------------
 
-def _dispatch_email(to_email: str, subject: str, html_body: str) -> None:
-    """Low-level Brevo send.  Raises ApiException on failure."""
+def make_student_verification_token(user) -> str:
+    """
+    Generate a JWT that can only be used to verify a student account.
+
+    The token is intentionally different from:
+        authapp email verification tokens
+        Simple JWT access tokens
+        Simple JWT refresh tokens
+    """
+    now = datetime.now(timezone.utc)
+    hours = getattr(
+        settings,
+        "STUDENT_EMAIL_VERIFICATION_HOURS",
+        168,
+    )
+
+    payload = {
+        "user_id": user.id,
+        "token_type": STUDENT_VERIFY_TOKEN_TYPE,
+        "iat": now,
+        "exp": now + timedelta(hours=hours),
+    }
+
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY,
+        algorithm="HS256",
+    )
+
+
+def _build_student_verification_url(user, base_url: str) -> str:
+    """
+    Build the complete student verification URL.
+
+    The namespaced URL ensures that reverse() always resolves the route
+    from student_auth/urls.py instead of a similarly named route in
+    another application.
+    """
+    token = make_student_verification_token(user)
+
+    path = reverse(
+        "student_auth:student-verify-email",
+        kwargs={"token": token},
+    )
+
+    return f"{base_url.rstrip('/')}{path}"
+
+
+def _get_brevo_client() -> TransactionalEmailsApi:
+    """
+    Return a configured Brevo transactional email client.
+    """
     configuration = Configuration()
     configuration.api_key["api-key"] = settings.BREVO_API_KEY
 
-    api_instance = TransactionalEmailsApi(ApiClient(configuration))
-    send_smtp_email = SendSmtpEmail(
-        to=[{"email": to_email}],
-        sender={"name": "School Admin", "email": settings.DEFAULT_FROM_EMAIL},
-        subject=subject,
-        html_content=html_body,
+    return TransactionalEmailsApi(
+        ApiClient(configuration)
     )
-    api_response = api_instance.send_transac_email(send_smtp_email)
-    logger.info("Email sent to %s: %s", to_email, api_response)
 
 
-def _build_guardian_html(guardian_list: list[dict]) -> str:
+def _guardian_rows_html(user) -> str:
     """
-    Render guardian rows from a list of plain dicts (already serialised by the view).
-    This avoids any ORM access inside the task.
-    """
-    if not guardian_list:
-        return "<li>No guardian information provided.</li>"
+    Return a safe HTML list containing the student's guardians.
 
+    Guardian identification numbers and other sensitive document
+    information are deliberately excluded.
+    """
     rows = []
-    for g in guardian_list:
-        label = "(Primary Contact)" if g.get("is_primary_contact") else ""
-        secondary = f" / {g['secondary_phone']}" if g.get("secondary_phone") else ""
-        email_line = f"<br>Email: {g['email']}" if g.get("email") else ""
-        rows.append(
-            f"<li><strong>{g['full_name']}</strong> — "
-            f"{g.get('relationship_display', g.get('relationship', ''))} {label}<br>"
-            f"Phone: {g['primary_phone']}{secondary}"
-            f"{email_line}</li>"
+
+    for guardian in user.guardians.all():
+        full_name = escape(guardian.full_name or "")
+        relationship = escape(
+            guardian.get_relationship_display() or ""
         )
-    return "\n".join(rows)
 
+        primary_text = (
+            " - primary contact"
+            if guardian.is_primary_contact
+            else ""
+        )
 
-# ---------------------------------------------------------------------------
-# Email tasks
-# ---------------------------------------------------------------------------
+        rows.append(
+            f"<li>{full_name} ({relationship}){primary_text}</li>"
+        )
+
+    if not rows:
+        return ""
+
+    return (
+        "<p>Guardians on file:</p>"
+        f"<ul>{''.join(rows)}</ul>"
+    )
+
 
 @shared_task(
     bind=True,
+    autoretry_for=(ApiException,),
+    retry_backoff=True,
+    retry_backoff_max=600,
     max_retries=3,
-    default_retry_delay=60,   # seconds between retries
+    acks_late=True,
     name="student_auth.tasks.send_student_verification_email",
 )
 def send_student_verification_email(
     self,
-    to_email: str,
-    first_name: str,
-    username: str,
-    index_number: str,
-    class_name_display: str,
-    raw_password: str,
-    verification_url: str,
-    guardian_list: list[dict],
+    user_id: int,
+    base_url: str,
 ) -> None:
     """
-    Send the initial account-verification email to a newly created student.
+    Send a student account verification email.
 
-    All arguments are primitives so Celery can serialise them with JSON.
-    ``guardian_list`` is a list of dicts with keys:
-        full_name, relationship, relationship_display,
-        primary_phone, secondary_phone, email, is_primary_contact
+    Only the user ID and backend base URL are passed through Celery.
+    The student's password, guardian information, and verification token
+    are not placed in the Celery task arguments.
+
+    The task exits without sending an email when:
+        - the student does not exist
+        - the account is not a student account
+        - the account is already active
+        - the account is blocked
     """
-    guardian_html = _build_guardian_html(guardian_list)
+    User = get_user_model()
 
-    html_body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; color: #333;">
-        <p>Dear {first_name},</p>
-        <h2 style="color: #4CAF50;">Welcome to Our School System!</h2>
-        <p>Your student account has been created.
-           Please click the button below to verify your email address:</p>
+    user = (
+        User.objects
+        .filter(
+            id=user_id,
+            role="student",
+        )
+        .prefetch_related("guardians")
+        .first()
+    )
 
-        <a href="{verification_url}"
-           style="display:inline-block;padding:10px 20px;background-color:#4CAF50;
-                  color:#fff;text-decoration:none;border-radius:5px;font-weight:bold;">
-            Verify Your Email
-        </a>
+    if not user:
+        logger.warning(
+            "Student verification email was not sent because "
+            "student user id=%s was not found.",
+            user_id,
+        )
+        return
 
-        <p>Your account details:</p>
-        <ul>
-            <li>Username: {username}</li>
-            <li>Email: {to_email}</li>
-            <li>Index Number: {index_number}</li>
-            <li>Class: {class_name_display}</li>
-            <li>Password: {raw_password}</li>
-        </ul>
+    if user.is_active:
+        logger.info(
+            "Student verification email was not sent because "
+            "user id=%s is already active.",
+            user.id,
+        )
+        return
 
-        <p><strong>Parent / Guardian on record:</strong></p>
-        <ul>{guardian_html}</ul>
+    if user.is_blocked:
+        logger.info(
+            "Student verification email was not sent because "
+            "user id=%s is blocked.",
+            user.id,
+        )
+        return
 
-        <p>Please keep these credentials safe.
-           We recommend changing your password after first login.</p>
-        <p>If you did not expect this email, please contact the school administration.</p>
-        <br>
-        <p>Best regards,<br>School Administration</p>
+    verification_url = _build_student_verification_url(
+        user,
+        base_url,
+    )
+
+    hours = getattr(
+        settings,
+        "STUDENT_EMAIL_VERIFICATION_HOURS",
+        168,
+    )
+
+    sender_name = getattr(
+        settings,
+        "STUDENT_EMAIL_SENDER_NAME",
+        getattr(
+            settings,
+            "ADMIN_EMAIL_SENDER_NAME",
+            "School Administration",
+        ),
+    )
+
+    guardian_html = _guardian_rows_html(user)
+
+    first_name = escape(user.first_name or "Student")
+    index_number = escape(user.index_number or "")
+
+    try:
+        class_display = user.get_class_name_display() or ""
+    except (AttributeError, TypeError, ValueError):
+        class_display = user.class_name or ""
+
+    class_name = escape(str(class_display))
+
+    # django.utils.html.escape() takes no `quote` kwarg — it always
+    # escapes <, >, &, ' and ", so it is safe inside an HTML attribute.
+    safe_verification_url = escape(verification_url)
+    safe_sender_name = escape(sender_name)
+
+    if hours % 24 == 0:
+        expiry_text = f"{hours // 24} days"
+    else:
+        expiry_text = f"{hours} hours"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0"
+        >
+        <title>Verify your student account</title>
+    </head>
+
+    <body
+        style="
+            margin: 0;
+            padding: 0;
+            background-color: #f5f7fa;
+            font-family: Arial, sans-serif;
+            color: #333333;
+        "
+    >
+        <div
+            style="
+                max-width: 620px;
+                margin: 30px auto;
+                padding: 30px;
+                background-color: #ffffff;
+                border-radius: 8px;
+            "
+        >
+            <p>Dear {first_name},</p>
+
+            <h2 style="color: #2f5d9e;">
+                Your student account is ready
+            </h2>
+
+            <p>
+                Index number:
+                <strong>{index_number}</strong>
+                <br>
+
+                Class:
+                <strong>{class_name}</strong>
+            </p>
+
+            <p>
+                Please verify your email address to activate
+                your student account.
+            </p>
+
+            <p style="margin: 30px 0;">
+                <a
+                    href="{safe_verification_url}"
+                    style="
+                        display: inline-block;
+                        background-color: #2f5d9e;
+                        color: #ffffff;
+                        padding: 12px 20px;
+                        border-radius: 6px;
+                        text-decoration: none;
+                        font-weight: bold;
+                    "
+                >
+                    Verify your email
+                </a>
+            </p>
+
+            <p>
+                This link expires in {expiry_text}.
+            </p>
+
+            <p>
+                Your password was set by the school administration.
+                If you do not have it, use
+                <strong>Forgot password</strong>
+                on the student login page to choose a new one.
+            </p>
+
+            {guardian_html}
+
+            <p>
+                If you did not expect this email, please contact
+                the school administration.
+            </p>
+
+            <p>
+                Regards,<br>
+                {safe_sender_name}
+            </p>
+        </div>
     </body>
     </html>
     """
 
-    try:
-        _dispatch_email(to_email, "Verify Your Student Account", html_body)
-    except ApiException as exc:
-        logger.error("Email error for %s: %s", to_email, exc)
-        # Exponential back-off: 60 s, 120 s, 240 s
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+    email = SendSmtpEmail(
+        to=[
+            {
+                "email": user.email,
+                "name": first_name,
+            }
+        ],
+        sender={
+            "name": sender_name,
+            "email": settings.DEFAULT_FROM_EMAIL,
+        },
+        subject="Verify your student account",
+        html_content=html_content,
+    )
 
-
-@shared_task(
-    bind=True,
-    max_retries=3,
-    default_retry_delay=60,
-    name="student_auth.tasks.send_batch_student_verification_email",
-)
-def send_batch_student_verification_email(
-    self,
-    to_email: str,
-    first_name: str,
-    index_number: str,
-    class_name_display: str,
-    verification_url: str,
-    guardian_list: list[dict],
-) -> None:
-    """
-    Lighter version of the verification email used during batch creation —
-    omits the plaintext password (not available after hashing in batch flow).
-    """
-    guardian_html = _build_guardian_html(guardian_list)
-
-    html_body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; color: #333;">
-        <p>Dear {first_name},</p>
-        <h2 style="color: #4CAF50;">Welcome to Our School System!</h2>
-        <p>Your student account has been created. Please verify your email address:</p>
-
-        <a href="{verification_url}"
-           style="display:inline-block;padding:10px 20px;background-color:#4CAF50;
-                  color:#fff;text-decoration:none;border-radius:5px;font-weight:bold;">
-            Verify Your Email
-        </a>
-
-        <p>Your account details:</p>
-        <ul>
-            <li>Index Number: {index_number}</li>
-            <li>Class: {class_name_display}</li>
-        </ul>
-
-        <p><strong>Parent / Guardian on record:</strong></p>
-        <ul>{guardian_html}</ul>
-
-        <p>If you did not expect this email, please contact the school administration.</p>
-        <br>
-        <p>Best regards,<br>School Administration</p>
-    </body>
-    </html>
-    """
+    client = _get_brevo_client()
 
     try:
-        _dispatch_email(to_email, "Verify Your Student Account", html_body)
-    except ApiException as exc:
-        logger.error("Batch email error for %s: %s", to_email, exc)
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+        client.send_transac_email(email)
+    except ApiException:
+        logger.exception(
+            "Failed to send student verification email for "
+            "user id=%s.",
+            user.id,
+        )
+        raise
 
-
-@shared_task(
-    bind=True,
-    max_retries=3,
-    default_retry_delay=60,
-    name="student_auth.tasks.send_generic_email",
-)
-def send_generic_email(self, to_email: str, subject: str, html_body: str) -> None:
-    """
-    General-purpose async email task.  Use this for any ad-hoc transactional
-    emails (password-reset notifications, admin alerts, etc.).
-    """
-    try:
-        _dispatch_email(to_email, subject, html_body)
-    except ApiException as exc:
-        logger.error("Generic email error for %s: %s", to_email, exc)
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+    logger.info(
+        "Student verification email sent for user id=%s.",
+        user.id,
+    )
